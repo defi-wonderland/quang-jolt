@@ -424,7 +424,7 @@ pub struct RegistersClaimReductionSumcheckVerifier<F: JoltField> {
 impl<F: JoltField> RegistersClaimReductionSumcheckVerifier<F> {
     pub fn new(
         trace_len: usize,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
         let params = RegistersClaimReductionSumcheckParams::new(trace_len, accumulator, transcript);
@@ -432,7 +432,7 @@ impl<F: JoltField> RegistersClaimReductionSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for RegistersClaimReductionSumcheckVerifier<F>
 {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
@@ -441,10 +441,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
-        let opening_point = SumcheckInstanceVerifier::<F, T>::get_params(self)
+        let opening_point = SumcheckInstanceVerifier::<F, T, A>::get_params(self)
             .normalize_opening_point(sumcheck_challenges);
 
         let (r_spartan, _) = accumulator.get_virtual_polynomial_opening(
@@ -473,11 +473,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
-        let opening_point = SumcheckInstanceVerifier::<F, T>::get_params(self)
+        let opening_point = SumcheckInstanceVerifier::<F, T, A>::get_params(self)
             .normalize_opening_point(sumcheck_challenges);
 
         accumulator.append_virtual(

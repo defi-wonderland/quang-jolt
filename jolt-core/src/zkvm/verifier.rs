@@ -399,7 +399,7 @@ where
         let _r_stage3 = BatchedSumcheck::verify(
             &self.proof.stage3_sumcheck_proof,
             vec![
-                &spartan_shift as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
+                &spartan_shift as &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
                 &spartan_instruction_input,
                 &spartan_registers_claim_reduction,
             ],
@@ -413,7 +413,7 @@ where
 
     fn verify_stage4(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE4);
-        verifier_accumulate_advice::<F>(
+        verifier_accumulate_advice::<F, VerifierOpeningAccumulator<F>>(
             self.proof.ram_K,
             &self.program_io,
             self.proof.untrusted_advice_commitment.is_some(),
@@ -466,7 +466,7 @@ where
         let _r_stage4 = BatchedSumcheck::verify(
             &self.proof.stage4_sumcheck_proof,
             vec![
-                &registers_read_write_checking as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
+                &registers_read_write_checking as &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
                 &ram_val_evaluation,
                 &ram_val_final,
             ],
@@ -499,7 +499,7 @@ where
         let _r_stage5 = BatchedSumcheck::verify(
             &self.proof.stage5_sumcheck_proof,
             vec![
-                &registers_val_evaluation as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
+                &registers_val_evaluation as &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
                 &ram_ra_reduction,
                 &lookups_read_raf,
             ],
@@ -546,7 +546,7 @@ where
         );
         let booleanity = BooleanityAddressSumcheckVerifier::new(booleanity_params);
 
-        let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
+        let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>> =
             vec![&bytecode_read_raf, &booleanity];
 
         let _r_stage6a = BatchedSumcheck::verify(
@@ -665,7 +665,7 @@ where
 
         let bytecode_read_raf = BytecodeReadRafCycleSumcheckVerifier::new(bytecode_read_raf_params);
 
-        let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> = vec![
+        let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>> = vec![
             &bytecode_read_raf,
             &ram_hamming_booleanity,
             &booleanity,
@@ -708,7 +708,7 @@ where
             &mut self.transcript,
         );
 
-        let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
+        let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>> =
             vec![&hw_verifier];
 
         if let Some(bytecode_reduction_verifier) = self.bytecode_reduction_verifier.as_mut() {

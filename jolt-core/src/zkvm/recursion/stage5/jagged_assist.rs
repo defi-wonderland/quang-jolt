@@ -21,7 +21,7 @@ use crate::{
     field::JoltField,
     poly::{
         eq_poly::EqPolynomial,
-        opening_proof::{ProverOpeningAccumulator, VerifierOpeningAccumulator},
+        opening_proof::{OpeningAccumulator, ProverOpeningAccumulator},
         unipoly::UniPoly,
     },
     subprotocols::{
@@ -567,7 +567,7 @@ impl<F: JoltField, T: Transcript> JaggedAssistVerifier<F, T> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssistVerifier<F, T> {
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A> for JaggedAssistVerifier<F, T> {
     fn degree(&self) -> usize {
         2
     }
@@ -576,7 +576,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssis
         self.num_sumcheck_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, _accumulator: &A) -> F {
         // Input claim: Σ_k r^k · v_k
         self.r_powers
             .iter()
@@ -588,7 +588,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssis
     #[tracing::instrument(skip_all, name = "JaggedAssistVerifier::expected_output_claim")]
     fn expected_output_claim(
         &self,
-        _accumulator: &VerifierOpeningAccumulator<F>,
+        _accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         // Final verification:
@@ -677,7 +677,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssis
 
     fn cache_openings(
         &self,
-        _accumulator: &mut VerifierOpeningAccumulator<F>,
+        _accumulator: &mut A,
         _transcript: &mut T,
         _sumcheck_challenges: &[F::Challenge],
     ) {

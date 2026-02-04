@@ -781,7 +781,7 @@ pub struct RegistersReadWriteCheckingVerifier<F: JoltField> {
 impl<F: JoltField> RegistersReadWriteCheckingVerifier<F> {
     pub fn new(
         trace_len: usize,
-        opening_accumulator: &VerifierOpeningAccumulator<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
         config: &ReadWriteConfig,
     ) -> Self {
@@ -795,7 +795,7 @@ impl<F: JoltField> RegistersReadWriteCheckingVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for RegistersReadWriteCheckingVerifier<F>
 {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
@@ -804,7 +804,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let r = self.params.normalize_opening_point(sumcheck_challenges);
@@ -842,7 +842,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[<F as JoltField>::Challenge],
     ) {

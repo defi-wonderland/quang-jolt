@@ -892,14 +892,14 @@ impl<F: JoltField> BooleanitySumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for BooleanitySumcheckVerifier<F> {
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A> for BooleanitySumcheckVerifier<F> {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
         &self.params
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let ra_claims: Vec<F> = self
@@ -930,7 +930,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for BooleanityS
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
@@ -965,7 +965,7 @@ impl<F: JoltField> BooleanityAddressSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for BooleanityAddressSumcheckVerifier<F>
 {
     fn degree(&self) -> usize {
@@ -976,13 +976,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         self.params.log_k_chunk
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         self.params.input_claim(accumulator)
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         _sumcheck_challenges: &[F::Challenge],
     ) -> F {
         accumulator
@@ -995,7 +995,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
@@ -1020,7 +1020,7 @@ impl<F: JoltField> BooleanityCycleSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for BooleanityCycleSumcheckVerifier<F>
 {
     fn degree(&self) -> usize {
@@ -1031,7 +1031,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         self.params.log_t
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         accumulator
             .get_virtual_polynomial_opening(
                 VirtualPolynomial::BooleanityAddrClaim,
@@ -1042,7 +1042,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let (r_address_point, _) = accumulator.get_virtual_polynomial_opening(
@@ -1082,7 +1082,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

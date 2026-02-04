@@ -317,12 +317,12 @@ pub fn prover_accumulate_advice<F: JoltField>(
 /// Otherwise opens at TWO points:
 /// 1. `r_address_rw` from `RamVal`/`RamReadWriteChecking` - used by `ValEvaluationSumcheck`
 /// 2. `r_address_raf` from `RamValFinal`/`RamOutputCheck` - used by `ValFinalSumcheck`
-pub fn verifier_accumulate_advice<F: JoltField>(
+pub fn verifier_accumulate_advice<F: JoltField, A: OpeningAccumulator<F>>(
     ram_K: usize,
     program_io: &JoltDevice,
     has_untrusted_advice_commitment: bool,
     has_trusted_advice_commitment: bool,
-    opening_accumulator: &mut VerifierOpeningAccumulator<F>,
+    opening_accumulator: &mut A,
     transcript: &mut impl Transcript,
     single_opening: bool,
 ) {

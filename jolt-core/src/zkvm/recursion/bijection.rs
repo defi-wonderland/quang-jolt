@@ -50,7 +50,7 @@ impl JaggedPolynomial {
 }
 
 /// Main bijection implementation for variable-count based jaggedness
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct VarCountJaggedBijection {
     /// Information for each polynomial
     polynomials: Vec<JaggedPolynomial>,
@@ -155,7 +155,7 @@ impl<F: JoltField> JaggedTransform<F> for VarCountJaggedBijection {
 }
 
 /// Maps between polynomial indices and constraint system structure
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ConstraintMapping {
     /// Maps polynomial index to (constraint_idx, poly_type)
     poly_to_constraint: Vec<(usize, PolyType)>,

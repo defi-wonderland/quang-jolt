@@ -335,8 +335,8 @@ impl DirectEvaluationVerifier {
 ///
 /// # Returns
 /// A vector of virtual claims organized by constraint then polynomial type
-pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulator<F>>(
-    accumulator: &A,
+pub fn extract_virtual_claims_from_accumulator<F: JoltField>(
+    accumulator: &dyn OpeningAccumulator<F>,
     constraint_types: &[ConstraintType],
     _gt_exp_public_inputs: &[PackedGtExpPublicInputs],
 ) -> Vec<F> {

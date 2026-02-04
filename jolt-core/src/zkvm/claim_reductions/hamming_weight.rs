@@ -459,7 +459,7 @@ impl<F: JoltField> HammingWeightClaimReductionVerifier<F> {
     /// Create verifier. r_cycle and r_addr_bool are extracted from Booleanity opening.
     pub fn new(
         one_hot_params: &OneHotParams,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
         let params =
@@ -468,7 +468,7 @@ impl<F: JoltField> HammingWeightClaimReductionVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for HammingWeightClaimReductionVerifier<F>
 {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
@@ -477,7 +477,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let N = self.params.polynomial_types.len();
@@ -517,7 +517,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

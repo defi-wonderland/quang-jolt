@@ -272,6 +272,93 @@ pub trait OpeningAccumulator<F: JoltField> {
         kind: AdviceKind,
         sumcheck: SumcheckId,
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)>;
+
+    /// Populates the opening point for an existing virtual polynomial claim.
+    /// This is the verifier version - the claim is read from the internal map.
+    /// Default implementation panics; only verifier accumulators implement this.
+    fn append_virtual<T: Transcript>(
+        &mut self,
+        _transcript: &mut T,
+        _polynomial: VirtualPolynomial,
+        _sumcheck: SumcheckId,
+        _opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) where
+        Self: Sized,
+    {
+        unimplemented!("append_virtual only available for verifier accumulators")
+    }
+
+    /// Populates the opening point for an existing untrusted advice claim.
+    /// This is the verifier version - the claim is read from the internal map.
+    /// Default implementation panics; only verifier accumulators implement this.
+    fn append_untrusted_advice<T: Transcript>(
+        &mut self,
+        _transcript: &mut T,
+        _sumcheck_id: SumcheckId,
+        _opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) where
+        Self: Sized,
+    {
+        unimplemented!("append_untrusted_advice only available for verifier accumulators")
+    }
+
+    /// Populates the opening point for an existing trusted advice claim.
+    /// This is the verifier version - the claim is read from the internal map.
+    /// Default implementation panics; only verifier accumulators implement this.
+    fn append_trusted_advice<T: Transcript>(
+        &mut self,
+        _transcript: &mut T,
+        _sumcheck_id: SumcheckId,
+        _opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) where
+        Self: Sized,
+    {
+        unimplemented!("append_trusted_advice only available for verifier accumulators")
+    }
+
+    /// Populates the opening point for an existing dense committed polynomial claim.
+    /// This is the verifier version - the claim is read from the internal map.
+    fn append_dense<T: Transcript>(
+        &mut self,
+        _transcript: &mut T,
+        _polynomial: CommittedPolynomial,
+        _sumcheck: SumcheckId,
+        _opening_point: Vec<F::Challenge>,
+    ) where
+        Self: Sized,
+    {
+        unimplemented!("append_dense only available for verifier accumulators")
+    }
+
+    /// Populates the opening point for multiple sparse committed polynomial claims.
+    /// This is the verifier version - the claims are read from the internal map.
+    fn append_sparse<T: Transcript>(
+        &mut self,
+        _transcript: &mut T,
+        _polynomials: Vec<CommittedPolynomial>,
+        _sumcheck: SumcheckId,
+        _opening_point: Vec<F::Challenge>,
+    ) where
+        Self: Sized,
+    {
+        unimplemented!("append_sparse only available for verifier accumulators")
+    }
+
+    /// Get the opening for untrusted advice at the given sumcheck.
+    fn get_untrusted_advice_opening(
+        &self,
+        _sumcheck_id: SumcheckId,
+    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
+        unimplemented!("get_untrusted_advice_opening only available for verifier accumulators")
+    }
+
+    /// Get the opening for trusted advice at the given sumcheck.
+    fn get_trusted_advice_opening(
+        &self,
+        _sumcheck_id: SumcheckId,
+    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
+        unimplemented!("get_trusted_advice_opening only available for verifier accumulators")
+    }
 }
 
 /// State for Dory batch opening (Stage 8).

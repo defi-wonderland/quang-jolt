@@ -326,7 +326,7 @@ impl<F: JoltField> ShiftScalarMulVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalarMulVerifier<F> {
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A> for ShiftScalarMulVerifier<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -335,13 +335,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalar
         self.params.num_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, _accumulator: &A) -> F {
         F::zero()
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let y_step = &sumcheck_challenges[..STEP_VARS];
@@ -367,7 +367,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalar
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

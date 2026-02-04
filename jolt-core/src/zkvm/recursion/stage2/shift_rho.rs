@@ -479,7 +479,7 @@ impl<F: JoltField> ShiftRhoVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVerifier<F> {
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A> for ShiftRhoVerifier<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -488,7 +488,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
         self.params.num_vars
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         // The sum should equal the batched claimed values fetched from accumulator
         let mut sum = F::zero();
         let mut gamma_power = F::one();
@@ -508,7 +508,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         // Get the shared point from the first claim (all claims share the same point)
@@ -552,7 +552,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

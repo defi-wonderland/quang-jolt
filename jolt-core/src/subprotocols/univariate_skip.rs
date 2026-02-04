@@ -4,7 +4,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::field::JoltField;
 use crate::poly::lagrange_poly::LagrangePolynomial;
-use crate::poly::opening_proof::{ProverOpeningAccumulator, VerifierOpeningAccumulator};
+use crate::poly::opening_proof::{OpeningAccumulator, ProverOpeningAccumulator};
 use crate::poly::unipoly::UniPoly;
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -163,10 +163,11 @@ impl<F: JoltField, T: Transcript> UniSkipFirstRoundProof<F, T> {
     /// - `const FIRST_ROUND_POLY_NUM_COEFFS`: number of coefficients in the first-round polynomial
     /// - `degree_bound_first`: Maximum allowed degree of the first univariate polynomial
     /// - `transcript`: Fiat-Shamir transcript
-    pub fn verify<const N: usize, const FIRST_ROUND_POLY_NUM_COEFFS: usize>(
+    /// - `A`: Generic accumulator type (VerifierOpeningAccumulator or MleOpeningAccumulator)
+    pub fn verify<const N: usize, const FIRST_ROUND_POLY_NUM_COEFFS: usize, A: OpeningAccumulator<F>>(
         proof: &Self,
-        sumcheck_instance: &dyn SumcheckInstanceVerifier<F, T>,
-        opening_accumulator: &mut VerifierOpeningAccumulator<F>,
+        sumcheck_instance: &dyn SumcheckInstanceVerifier<F, T, A>,
+        opening_accumulator: &mut A,
         transcript: &mut T,
     ) -> Result<(), ProofVerifyError> {
         let degree_bound = sumcheck_instance.degree();

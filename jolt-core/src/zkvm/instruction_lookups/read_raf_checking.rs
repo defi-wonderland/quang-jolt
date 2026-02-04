@@ -1172,7 +1172,7 @@ impl<F: JoltField> InstructionReadRafSumcheckVerifier<F> {
     pub fn new(
         n_cycle_vars: usize,
         one_hot_params: &OneHotParams,
-        opening_accumulator: &VerifierOpeningAccumulator<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
         let params = InstructionReadRafSumcheckParams::new(
@@ -1185,7 +1185,7 @@ impl<F: JoltField> InstructionReadRafSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for InstructionReadRafSumcheckVerifier<F>
 {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
@@ -1194,7 +1194,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         // Verifier's RHS reconstruction from virtual claims at r:
@@ -1267,7 +1267,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

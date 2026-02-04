@@ -408,7 +408,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1369,6 +1369,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "gnark-transpiler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-grumpkin",
+ "ark-serialize",
+ "ark-std",
+ "common",
+ "jolt-core",
+ "light-poseidon",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "zklean-extractor",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1968,8 +1988,10 @@ dependencies = [
  "jolt-inlines-sha2",
  "jolt-optimizations",
  "jolt-platform",
+ "light-poseidon",
  "memory-stats",
  "num",
+ "num-bigint",
  "num-derive",
  "num-integer",
  "num-traits",
@@ -2216,6 +2238,18 @@ checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
 dependencies = [
  "bitflags 2.10.0",
  "libc",
+]
+
+[[package]]
+name = "light-poseidon"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47a1ccadd0bb5a32c196da536fd72c59183de24a055f6bf0513bf845fefab862"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "num-bigint",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5316,9 +5350,12 @@ dependencies = [
  "clap",
  "common",
  "jolt-core",
+ "num-bigint",
  "proptest",
  "rand_core 0.6.4",
  "regex",
+ "serde",
+ "serde_json",
  "strum 0.26.3",
  "tracer",
 ]

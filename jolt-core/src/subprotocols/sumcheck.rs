@@ -2,7 +2,7 @@
 #![allow(clippy::type_complexity)]
 
 use crate::field::JoltField;
-use crate::poly::opening_proof::{ProverOpeningAccumulator, VerifierOpeningAccumulator};
+use crate::poly::opening_proof::{OpeningAccumulator, ProverOpeningAccumulator};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -167,10 +167,10 @@ impl BatchedSumcheck {
         (SumcheckInstanceProof::new(compressed_polys), r_sumcheck)
     }
 
-    pub fn verify<F: JoltField, ProofTranscript: Transcript>(
+    pub fn verify<F: JoltField, ProofTranscript: Transcript, A: OpeningAccumulator<F>>(
         proof: &SumcheckInstanceProof<F, ProofTranscript>,
-        sumcheck_instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>>,
-        opening_accumulator: &mut VerifierOpeningAccumulator<F>,
+        sumcheck_instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, A>>,
+        opening_accumulator: &mut A,
         transcript: &mut ProofTranscript,
     ) -> Result<Vec<F::Challenge>, ProofVerifyError> {
         let max_degree = sumcheck_instances

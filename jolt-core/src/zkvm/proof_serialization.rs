@@ -42,7 +42,7 @@ use ark_bn254::{Fq, Fq12};
 use ark_grumpkin::Projective as GrumpkinProjective;
 
 /// Constraint metadata for the recursion verifier
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionConstraintMetadata {
     pub constraint_types: Vec<ConstraintType>,
     pub jagged_bijection: VarCountJaggedBijection,

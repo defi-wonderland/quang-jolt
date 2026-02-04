@@ -1,0 +1,11 @@
+# Groth16 artifacts
+*.pk
+*.vk
+*.r1cs
+*.proof
+*.pub
+groth16
+
+# Generated circuit code (run transpiler to regenerate)
+stages16_circuit.go
+stages16_witness.json

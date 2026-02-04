@@ -6,7 +6,7 @@
 use crate::{
     field::JoltField,
     poly::opening_proof::{
-        OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator, BIG_ENDIAN,
+        OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN,
     },
     transcripts::Transcript,
     zkvm::witness::VirtualPolynomial,
@@ -34,8 +34,8 @@ pub fn append_virtual_claims<F: JoltField, T: Transcript>(
 }
 
 /// Generic helper to append virtual polynomial openings for verifier
-pub fn append_virtual_openings<F: JoltField, T: Transcript>(
-    accumulator: &mut VerifierOpeningAccumulator<F>,
+pub fn append_virtual_openings<F: JoltField, T: Transcript, A: OpeningAccumulator<F>>(
+    accumulator: &mut A,
     transcript: &mut T,
     sumcheck_id: SumcheckId,
     opening_point: &OpeningPoint<BIG_ENDIAN, F>,
@@ -47,12 +47,11 @@ pub fn append_virtual_openings<F: JoltField, T: Transcript>(
 }
 
 /// Generic helper to retrieve multiple virtual polynomial claims
-pub fn get_virtual_claims<F: JoltField>(
-    accumulator: &VerifierOpeningAccumulator<F>,
+pub fn get_virtual_claims<F: JoltField, A: OpeningAccumulator<F>>(
+    accumulator: &A,
     sumcheck_id: SumcheckId,
     polynomials: &[VirtualPolynomial],
 ) -> Vec<F> {
-    use crate::poly::opening_proof::OpeningAccumulator;
     polynomials
         .iter()
         .map(|poly| {

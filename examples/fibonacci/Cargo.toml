@@ -3,6 +3,9 @@ name = "fibonacci"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+transcript-poseidon = ["jolt-sdk/transcript-poseidon"]
+
 [dependencies]
 jolt-sdk = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true

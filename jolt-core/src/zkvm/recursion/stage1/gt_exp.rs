@@ -27,8 +27,7 @@ use crate::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
-            OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
-            BIG_ENDIAN,
+            OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN,
         },
         unipoly::UniPoly,
     },
@@ -979,7 +978,9 @@ impl PackedGtExpVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for PackedGtExpVerifier {
+impl<T: Transcript, A: OpeningAccumulator<Fq>> SumcheckInstanceVerifier<Fq, T, A>
+    for PackedGtExpVerifier
+{
     fn degree(&self) -> usize {
         7
     }
@@ -988,13 +989,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for PackedGtExpVerifier {
         self.params.num_constraint_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<Fq>) -> Fq {
+    fn input_claim(&self, _accumulator: &A) -> Fq {
         Fq::zero()
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<Fq>,
+        accumulator: &A,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
         use crate::poly::dense_mlpoly::DensePolynomial;
@@ -1081,7 +1082,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for PackedGtExpVerifier {
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {

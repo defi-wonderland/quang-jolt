@@ -1,9 +1,14 @@
 use crate::poly::opening_proof::{OpeningAccumulator, OpeningPoint, BIG_ENDIAN};
 use crate::transcripts::Transcript;
 
-use crate::{field::JoltField, poly::opening_proof::VerifierOpeningAccumulator};
+use crate::field::JoltField;
 
-pub trait SumcheckInstanceVerifier<F: JoltField, T: Transcript> {
+/// Sumcheck instance verifier trait, generic over accumulator type.
+///
+/// The generic `A: OpeningAccumulator<F>` allows using either:
+/// - `VerifierOpeningAccumulator<F>` for real verification
+/// - `MleOpeningAccumulator` for symbolic transpilation to Gnark
+pub trait SumcheckInstanceVerifier<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
         unimplemented!(
             "If get_params is unimplemented, degree, num_rounds, and \
@@ -30,14 +35,14 @@ pub trait SumcheckInstanceVerifier<F: JoltField, T: Transcript> {
     }
 
     /// Returns the initial claim of this sumcheck instance.
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         self.get_params().input_claim(accumulator)
     }
 
     /// Expected final claim after binding to the provided instance-local r slice.
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F;
 
@@ -45,7 +50,7 @@ pub trait SumcheckInstanceVerifier<F: JoltField, T: Transcript> {
     /// r is the instance-local slice; instance normalizes internally.
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     );

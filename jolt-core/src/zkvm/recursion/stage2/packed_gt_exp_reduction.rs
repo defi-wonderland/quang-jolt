@@ -251,7 +251,7 @@ impl<F: JoltField> PackedGtExpClaimReductionVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for PackedGtExpClaimReductionVerifier<F>
 {
     fn degree(&self) -> usize {
@@ -262,7 +262,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         self.params.num_vars
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         let mut sum = F::zero();
         let mut gamma_power = F::one();
         for idx in &self.claim_indices {
@@ -286,7 +286,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let (rho_point, _) = accumulator.get_virtual_polynomial_opening(
@@ -320,7 +320,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

@@ -392,7 +392,7 @@ impl<F: JoltField> JaggedSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedSumcheckVerifier<F> {
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A> for JaggedSumcheckVerifier<F> {
     fn degree(&self) -> usize {
         2 // Degree from q(i) * f_jagged(i) where f_jagged is degree 1
     }
@@ -401,14 +401,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedSumch
         self.params.num_dense_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, _accumulator: &A) -> F {
         self.sparse_claim_value
     }
 
     #[tracing::instrument(skip_all, name = "JaggedSumcheckVerifier::expected_output_claim")]
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         _sumcheck_challenges: &[F::Challenge],
     ) -> F {
         // Get the dense polynomial opening claim from the accumulator
@@ -420,7 +420,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedSumch
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

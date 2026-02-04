@@ -151,7 +151,7 @@ pub trait ConstraintListVerifierSpec<F: JoltField, const DEGREE: usize>:
     ConstraintListSpec
 {
     /// Initial sumcheck claim (default: 0).
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, _accumulator: &dyn OpeningAccumulator<F>) -> F {
         F::zero()
     }
 
@@ -435,7 +435,7 @@ where
     }
 }
 
-impl<F: JoltField, T: Transcript, Spec, const DEGREE: usize> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, Spec, const DEGREE: usize, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for ConstraintListVerifier<F, Spec, DEGREE>
 where
     Spec: ConstraintListVerifierSpec<F, DEGREE>,
@@ -448,13 +448,13 @@ where
         self.spec.num_rounds()
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         self.spec.input_claim(accumulator)
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let eq_point_f: Vec<F> = self.eq_point.iter().map(|c| (*c).into()).collect();
@@ -500,7 +500,7 @@ where
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

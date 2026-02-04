@@ -253,7 +253,7 @@ impl<F: JoltField> RafEvaluationSumcheckVerifier<F> {
     pub fn new(
         memory_layout: &MemoryLayout,
         one_hot_params: &OneHotParams,
-        opening_accumulator: &VerifierOpeningAccumulator<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
     ) -> Self {
         let params =
             RafEvaluationSumcheckParams::new(memory_layout, one_hot_params, opening_accumulator);
@@ -261,10 +261,10 @@ impl<F: JoltField> RafEvaluationSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for RafEvaluationSumcheckVerifier<F>
 {
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         let result = self.params.input_claim(accumulator);
 
         #[cfg(test)]
@@ -283,7 +283,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let r = self.params.normalize_opening_point(sumcheck_challenges);
@@ -321,7 +321,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

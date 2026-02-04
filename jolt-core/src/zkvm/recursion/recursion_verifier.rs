@@ -253,7 +253,7 @@ impl RecursionVerifier<Fq> {
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
 
-        let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T>>> = Vec::new();
+        let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T, VerifierOpeningAccumulator<Fq>>>> = Vec::new();
 
         // Count constraints by type and collect per-type sequential indices (matching the extractor).
         let mut num_gt_exp = 0usize;
@@ -448,7 +448,7 @@ impl RecursionVerifier<Fq> {
             return Err("No constraints to verify in Stage 2".into());
         }
 
-        let verifier_refs: Vec<&dyn SumcheckInstanceVerifier<Fq, T>> =
+        let verifier_refs: Vec<&dyn SumcheckInstanceVerifier<Fq, T, VerifierOpeningAccumulator<Fq>>> =
             verifiers.iter().map(|v| &**v).collect();
         let r_x = BatchedSumcheck::verify(proof, verifier_refs, accumulator, transcript)?;
         Ok(r_x)

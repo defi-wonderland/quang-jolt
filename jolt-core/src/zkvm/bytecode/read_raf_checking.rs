@@ -1153,7 +1153,7 @@ impl<F: JoltField> BytecodeReadRafSumcheckVerifier<F> {
         program: &crate::zkvm::program::ProgramPreprocessing,
         n_cycle_vars: usize,
         one_hot_params: &OneHotParams,
-        opening_accumulator: &VerifierOpeningAccumulator<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
     ) -> Self {
         Self {
@@ -1168,7 +1168,7 @@ impl<F: JoltField> BytecodeReadRafSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for BytecodeReadRafSumcheckVerifier<F>
 {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
@@ -1177,7 +1177,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
@@ -1230,7 +1230,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[<F as JoltField>::Challenge],
     ) {
@@ -1264,7 +1264,7 @@ impl<F: JoltField> BytecodeReadRafAddressSumcheckVerifier<F> {
         program: Option<&crate::zkvm::program::ProgramPreprocessing>,
         n_cycle_vars: usize,
         one_hot_params: &OneHotParams,
-        opening_accumulator: &VerifierOpeningAccumulator<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
         transcript: &mut impl Transcript,
         program_mode: ProgramMode,
     ) -> Result<Self, ProofVerifyError> {
@@ -1306,7 +1306,7 @@ impl<F: JoltField> BytecodeReadRafAddressSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for BytecodeReadRafAddressSumcheckVerifier<F>
 {
     fn degree(&self) -> usize {
@@ -1317,13 +1317,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         self.params.log_K
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         self.params.input_claim(accumulator)
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         _sumcheck_challenges: &[F::Challenge],
     ) -> F {
         accumulator
@@ -1336,7 +1336,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
@@ -1375,7 +1375,7 @@ impl<F: JoltField> BytecodeReadRafCycleSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for BytecodeReadRafCycleSumcheckVerifier<F>
 {
     fn degree(&self) -> usize {
@@ -1386,7 +1386,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         self.params.log_T
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+    fn input_claim(&self, accumulator: &A) -> F {
         accumulator
             .get_virtual_polynomial_opening(
                 VirtualPolynomial::BytecodeReadRafAddrClaim,
@@ -1397,7 +1397,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
+        accumulator: &A,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let (r_address_point, _) = accumulator.get_virtual_polynomial_opening(
@@ -1469,7 +1469,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {

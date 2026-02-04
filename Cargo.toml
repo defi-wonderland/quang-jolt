@@ -80,6 +80,7 @@ members = [
     "examples/msm",
     "examples/msm/guest",
     "zklean-extractor",
+    "gnark-transpiler",
     "z3-verifier",
 ]
 
