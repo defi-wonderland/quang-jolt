@@ -7,5 +7,5 @@
 groth16
 
 # Generated circuit code (run transpiler to regenerate)
-stages16_circuit.go
-stages16_witness.json
+stages_circuit.go
+stages_witness.json

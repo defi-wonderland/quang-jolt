@@ -41,7 +41,6 @@ pub mod codegen;
 pub mod mle_opening_accumulator;
 pub mod poseidon;
 pub mod symbolic_proof;
-pub mod transpilable_verifier;
 pub mod witness;
 
 pub use ast_json::Stage1AstJson;
@@ -53,5 +52,4 @@ pub use ast_commitment_scheme::AstCommitmentScheme;
 pub use mle_opening_accumulator::MleOpeningAccumulator;
 pub use poseidon::PoseidonAstTranscript;
 pub use symbolic_proof::{symbolize_sumcheck_proofs, symbolize_jolt_proof, extract_sumcheck_witness_values, SymbolicSumcheckProofs, VarAllocator};
-pub use transpilable_verifier::TranspilableStage1Verifier;
 pub use witness::Stage1Witness;

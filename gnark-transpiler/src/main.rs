@@ -300,11 +300,11 @@ fn main() {
 
     // Generate Gnark circuit
     println!("\n=== Generating Gnark Circuit ===");
-    let circuit_code = generate_stages_circuit(&assertions, &var_names, "JoltStages16Circuit");
+    let circuit_code = generate_stages_circuit(&assertions, &var_names, "JoltStagesCircuit");
 
     // Write to file
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let output_path = format!("{}/go/stages16_circuit.go", manifest_dir);
+    let output_path = format!("{}/go/stages_circuit.go", manifest_dir);
     std::fs::write(&output_path, &circuit_code).expect("Failed to write circuit file");
     println!("  Circuit written to: {}", output_path);
     println!("  Circuit size: {} bytes", circuit_code.len());
@@ -323,13 +323,13 @@ fn main() {
     }
 
     let witness_json = serde_json::to_string_pretty(&witness_map).expect("Failed to serialize witness");
-    let witness_path = format!("{}/go/stages16_witness.json", manifest_dir);
+    let witness_path = format!("{}/go/stages_witness.json", manifest_dir);
     std::fs::write(&witness_path, &witness_json).expect("Failed to write witness file");
     println!("  Witness written to: {}", witness_path);
     println!("  Witness variables: {}", witness_map.len());
 
     println!("\n=== SUCCESS ===");
-    println!("TranspilableVerifier stages 1-6 transpiled to Gnark circuit.");
+    println!("TranspilableVerifier stages 1-7 transpiled to Gnark circuit.");
 }
 
 /// Generate Gnark circuit code from accumulated assertions

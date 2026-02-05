@@ -19,14 +19,14 @@ import (
 	"github.com/consensys/gnark/test"
 )
 
-// getStages16WitnessPath returns the path to stages16_witness.json
-func getStages16WitnessPath() string {
+// getStagesWitnessPath returns the path to stages_witness.json
+func getStagesWitnessPath() string {
 	_, currentFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(currentFile), "stages16_witness.json")
+	return filepath.Join(filepath.Dir(currentFile), "stages_witness.json")
 }
 
-// LoadStages16Assignment loads witness data and creates a circuit assignment
-func LoadStages16Assignment(witnessPath string) (*JoltStages16Circuit, error) {
+// LoadStagesAssignment loads witness data and creates a circuit assignment
+func LoadStagesAssignment(witnessPath string) (*JoltStagesCircuit, error) {
 	data, err := os.ReadFile(witnessPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read witness file: %w", err)
@@ -37,7 +37,7 @@ func LoadStages16Assignment(witnessPath string) (*JoltStages16Circuit, error) {
 		return nil, fmt.Errorf("failed to parse witness JSON: %w", err)
 	}
 
-	assignment := &JoltStages16Circuit{}
+	assignment := &JoltStagesCircuit{}
 	v := reflect.ValueOf(assignment).Elem()
 	t := v.Type()
 
@@ -66,7 +66,7 @@ func LoadStages16Assignment(witnessPath string) (*JoltStages16Circuit, error) {
 	return assignment, nil
 }
 
-func TestStages16CircuitCompile(t *testing.T) {
+func TestStagesCircuitCompile(t *testing.T) {
 	t.Log("Jolt Stages 1-7 Verifier - Gnark Circuit Compilation Test")
 	t.Log("")
 
@@ -74,7 +74,7 @@ func TestStages16CircuitCompile(t *testing.T) {
 	t.Log("Compiling circuit...")
 	startCompile := time.Now()
 
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 	r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
 		t.Fatalf("Failed to compile circuit: %v", err)
@@ -91,13 +91,13 @@ func TestStages16CircuitCompile(t *testing.T) {
 	t.Log("✓ Circuit compilation successful!")
 }
 
-func TestStages16CircuitSolver(t *testing.T) {
+func TestStagesCircuitSolver(t *testing.T) {
 	t.Log("Jolt Stages 1-7 Verifier - Gnark Solver Debug Test")
 	t.Log("")
 
 	// Load witness
-	witnessPath := getStages16WitnessPath()
-	assignment, err := LoadStages16Assignment(witnessPath)
+	witnessPath := getStagesWitnessPath()
+	assignment, err := LoadStagesAssignment(witnessPath)
 	if err != nil {
 		t.Fatalf("Failed to load witness data: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestStages16CircuitSolver(t *testing.T) {
 	}
 
 	// Use gnark test solver to check constraints
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 	err = test.IsSolved(&circuit, assignment, ecc.BN254.ScalarField())
 	if err != nil {
 		t.Logf("Solver error: %v", err)
@@ -207,13 +207,13 @@ func TestStages16CircuitSolver(t *testing.T) {
 	}
 }
 
-func TestStages16CircuitProveVerify(t *testing.T) {
+func TestStagesCircuitProveVerify(t *testing.T) {
 	t.Log("Jolt Stages 1-7 Verifier - Full Groth16 Prove/Verify Test")
 	t.Log("")
 
 	// Load witness
-	witnessPath := getStages16WitnessPath()
-	assignment, err := LoadStages16Assignment(witnessPath)
+	witnessPath := getStagesWitnessPath()
+	assignment, err := LoadStagesAssignment(witnessPath)
 	if err != nil {
 		t.Fatalf("Failed to load witness data: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestStages16CircuitProveVerify(t *testing.T) {
 	t.Log("Compiling circuit...")
 	startCompile := time.Now()
 
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 	r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
 		t.Fatalf("Failed to compile circuit: %v", err)
@@ -314,15 +314,15 @@ func TestCorruptedWitnessRejected(t *testing.T) {
 	t.Log("")
 
 	// Load valid witness
-	witnessPath := getStages16WitnessPath()
-	validAssignment, err := LoadStages16Assignment(witnessPath)
+	witnessPath := getStagesWitnessPath()
+	validAssignment, err := LoadStagesAssignment(witnessPath)
 	if err != nil {
 		t.Fatalf("Failed to load witness data: %v", err)
 	}
 
 	// First verify the valid witness passes
 	t.Log("Step 1: Verify valid witness passes...")
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 	err = test.IsSolved(&circuit, validAssignment, ecc.BN254.ScalarField())
 	if err != nil {
 		t.Fatalf("Valid witness should pass but got error: %v", err)
@@ -386,7 +386,7 @@ func TestCorruptedWitnessRejected(t *testing.T) {
 
 	for _, tc := range testCases {
 		// Reload fresh witness
-		assignment, err := LoadStages16Assignment(witnessPath)
+		assignment, err := LoadStagesAssignment(witnessPath)
 		if err != nil {
 			t.Fatalf("Failed to reload witness: %v", err)
 		}
@@ -436,12 +436,12 @@ func TestRandomFuzzing(t *testing.T) {
 	t.Log("")
 
 	// Load valid witness
-	witnessPath := getStages16WitnessPath()
+	witnessPath := getStagesWitnessPath()
 
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 
 	// Get list of field names
-	v := reflect.ValueOf(&JoltStages16Circuit{}).Elem()
+	v := reflect.ValueOf(&JoltStagesCircuit{}).Elem()
 	fieldNames := make([]string, 0)
 	for i := 0; i < v.NumField(); i++ {
 		fieldNames = append(fieldNames, v.Type().Field(i).Name)
@@ -465,7 +465,7 @@ func TestRandomFuzzing(t *testing.T) {
 		fieldName := fieldNames[fieldIdx]
 
 		// Load fresh witness
-		assignment, err := LoadStages16Assignment(witnessPath)
+		assignment, err := LoadStagesAssignment(witnessPath)
 		if err != nil {
 			t.Fatalf("Failed to load witness: %v", err)
 		}
@@ -524,7 +524,7 @@ func TestAssertionCountMatchesTheory(t *testing.T) {
 	// The transpiler output shows 13 assertions for Stages 1-5.
 
 	// Read the generated circuit to count assertions
-	circuitPath := filepath.Join(filepath.Dir(getStages16WitnessPath()), "stages16_circuit.go")
+	circuitPath := filepath.Join(filepath.Dir(getStagesWitnessPath()), "stages_circuit.go")
 	data, err := os.ReadFile(circuitPath)
 	if err != nil {
 		t.Fatalf("Failed to read circuit file: %v", err)
@@ -590,7 +590,7 @@ func TestCircuitNotTrivial(t *testing.T) {
 	t.Log("")
 
 	// Compile circuit and check constraint count
-	var circuit JoltStages16Circuit
+	var circuit JoltStagesCircuit
 	r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
 		t.Fatalf("Failed to compile circuit: %v", err)
@@ -614,8 +614,8 @@ func TestCircuitNotTrivial(t *testing.T) {
 	}
 
 	// Check witness has meaningful values
-	witnessPath := getStages16WitnessPath()
-	assignment, err := LoadStages16Assignment(witnessPath)
+	witnessPath := getStagesWitnessPath()
+	assignment, err := LoadStagesAssignment(witnessPath)
 	if err != nil {
 		t.Fatalf("Failed to load witness: %v", err)
 	}
