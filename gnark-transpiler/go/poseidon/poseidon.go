@@ -139,6 +139,33 @@ func (c *BN254Chip) mix(state_ BN254State, constantMatrix [][]*big.Int) BN254Sta
 	return result
 }
 
+// =============================================================================
+// HINT FUNCTIONS - SECURITY ANALYSIS
+// =============================================================================
+//
+// These hints compute values outside the constraint system. The prover provides
+// these values, so we must ensure a malicious prover cannot exploit them.
+//
+// WHY THESE HINTS ARE SOUND:
+//
+// 1. Hint inputs are constrained:
+//    - All hint inputs come from either:
+//      a) Public inputs (verifier-provided)
+//      b) Previous Poseidon hash outputs (constrained by hash computation)
+//
+// 2. Hint outputs flow into Poseidon:
+//    - ByteReverse, Truncate128, etc. outputs become Poseidon inputs
+//    - Poseidon computation IS constrained (ark, sbox, mix operations)
+//
+// 3. Fiat-Shamir binding:
+//    - Wrong hint values → wrong Poseidon output → wrong challenge
+//    - Wrong challenge → proof doesn't verify (sumcheck fails)
+//
+// Therefore, a malicious prover cannot provide incorrect hint values without
+// causing verification to fail. The hints are effectively "constrained by usage."
+//
+// =============================================================================
+
 // ByteReverse performs byte-reversal of a field element.
 // This matches Rust PoseidonTranscript::append_scalar behavior:
 //

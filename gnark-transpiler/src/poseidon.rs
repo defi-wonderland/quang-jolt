@@ -7,6 +7,27 @@
 //! - Width-3 Poseidon: poseidon(state, n_rounds, data)
 //! - Domain separation via n_rounds counter
 //! - Same byte chunking and padding behavior
+//!
+//! ## Challenge Derivation Modes
+//!
+//! Two different challenge derivation methods exist, producing different AST nodes:
+//!
+//! | Jolt Function                    | AST Node             | Used For                    |
+//! |----------------------------------|----------------------|-----------------------------|
+//! | `challenge_scalar_128_bits()`    | `Truncate128`        | Batching coefficients       |
+//! | `challenge_scalar_optimized()`   | `Truncate128Reverse` | Sumcheck challenges (r)     |
+//!
+//! ### Truncate128 (simple 128-bit truncation)
+//! - Takes low 16 bytes of hash, interprets as field element
+//! - Used for batching where range doesn't matter
+//!
+//! ### Truncate128Reverse (optimized Montgomery representation)
+//! - Applies 125-bit mask + shift to create `[0, 0, low, high]` limb layout
+//! - Multiplies by R⁻¹ because `from_bigint_unchecked` expects Montgomery form
+//! - Used for sumcheck challenges where MontU128Challenge optimization applies
+//!
+//! See `MontU128Challenge` in `jolt-core/src/transcripts/poseidon.rs` for the
+//! optimized representation that avoids expensive `into()` conversions.
 
 use ark_ec::CurveGroup;
 use ark_serialize::CanonicalSerialize;
@@ -359,45 +380,47 @@ impl Transcript for PoseidonAstTranscript {
         powers
     }
 
-    fn challenge_scalar_optimized<F: JoltField>(&mut self) -> F::Challenge {
-        // For MleAst: F::Challenge = MleAst, so we need to use the pending challenge mechanism
-        // Same as challenge_scalar_128_bits but returns F::Challenge
-        //
-        // Since F::Challenge doesn't have from_bytes in its trait bounds, but we know
-        // this implementation is only used with F = MleAst where F::Challenge = MleAst,
-        // we use the F::from_bytes and convert via Into.
+    /// Returns a challenge scalar using the optimized 125-bit representation.
+    ///
+    /// # Safety Invariant
+    /// This function uses `transmute_copy` which is only safe when `F = MleAst`.
+    /// For MleAst, `F::Challenge = MleAst` (same type), so the transmute is a no-op.
+    /// We add a runtime assertion to catch misuse early.
+    fn challenge_scalar_optimized<F: JoltField + 'static>(&mut self) -> F::Challenge {
+        // Runtime check: ensure this is only called with F = MleAst
+        assert!(
+            std::any::TypeId::of::<F>() == std::any::TypeId::of::<MleAst>(),
+            "PoseidonAstTranscript only supports F = MleAst for symbolic execution"
+        );
+
         let hash = self.challenge_mle();
         let challenge = MleAst::truncate_128_reverse(&hash);
         set_pending_challenge(challenge);
-        // F has from_bytes, and the pending challenge mechanism works via JoltField::from_bytes
-        // For MleAst, this returns the pending challenge we just set
+        // The pending_challenge mechanism: F::from_bytes returns the pending challenge for MleAst
         let f_val: F = F::from_bytes(&[0u8; 16]);
-        // Now convert F to F::Challenge. Since F::Challenge: Into<F>, but we need F -> F::Challenge,
-        // and for MleAst where F = F::Challenge = MleAst, the Default is wrong.
-        // The clean solution: return the challenge directly since we know F::Challenge = MleAst
-        // Use unsafe transmute or just accept that this only works for MleAst
-        //
-        // Actually, the simplest fix: use Default but override with the pending challenge
-        // in the JoltField implementation. But that's circular.
-        //
-        // Best approach: since we set pending_challenge, and F::from_bytes returns it,
-        // we can return F::Challenge::default() but first convert f_val appropriately.
-        // For MleAst, f_val IS the challenge, and we can transmute since they're the same type.
-        //
-        // Since this is MleAst-specific: use type punning via mem::transmute
-        // This is safe because for MleAst, F = F::Challenge = MleAst
+        // SAFETY: We verified F = MleAst above, and for MleAst, F::Challenge = MleAst.
+        // Both types are identical, so this transmute is a no-op bit copy.
         unsafe { std::mem::transmute_copy::<F, F::Challenge>(&f_val) }
     }
 
-    fn challenge_vector_optimized<F: JoltField>(&mut self, len: usize) -> Vec<F::Challenge> {
-        // Use the pending challenge mechanism for each element
+    /// Returns a vector of challenge scalars using the optimized representation.
+    ///
+    /// # Safety Invariant
+    /// Same as `challenge_scalar_optimized` - only safe when `F = MleAst`.
+    fn challenge_vector_optimized<F: JoltField + 'static>(&mut self, len: usize) -> Vec<F::Challenge> {
+        // Runtime check: ensure this is only called with F = MleAst
+        assert!(
+            std::any::TypeId::of::<F>() == std::any::TypeId::of::<MleAst>(),
+            "PoseidonAstTranscript only supports F = MleAst for symbolic execution"
+        );
+
         (0..len)
             .map(|_| {
                 let hash = self.challenge_mle();
                 let challenge = MleAst::truncate_128_reverse(&hash);
                 set_pending_challenge(challenge);
                 let f_val: F = F::from_bytes(&[0u8; 16]);
-                // Same transmute as above - safe for MleAst where F = F::Challenge
+                // SAFETY: Verified F = MleAst above
                 unsafe { std::mem::transmute_copy::<F, F::Challenge>(&f_val) }
             })
             .collect()
