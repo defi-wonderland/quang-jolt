@@ -8,6 +8,14 @@ pub fn main() {
     let save_to_disk = std::env::args().any(|arg| arg == "--save");
     let committed_bytecode = std::env::args().any(|arg| arg == "--committed-bytecode");
 
+    // Get fibonacci input from command line (default 50)
+    let fib_input: u64 = std::env::args()
+        .skip(1)  // skip program name
+        .filter(|arg| !arg.starts_with("--"))
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_fib(target_dir);
 
@@ -30,22 +38,23 @@ pub fn main() {
 
     let verify_fib = guest::build_verifier_fib(verifier_preprocessing);
 
-    let program_summary = guest::analyze_fib(10);
+    let program_summary = guest::analyze_fib(fib_input as u32);
     program_summary
-        .write_to_file("fib_10.txt".into())
+        .write_to_file(format!("fib_{}.txt", fib_input).into())
         .expect("should write");
 
     let trace_file = "/tmp/fib_trace.bin";
-    guest::trace_fib_to_file(trace_file, 50);
-    info!("Trace file written to: {trace_file}.");
+    guest::trace_fib_to_file(trace_file, fib_input as u32);
+    info!("Trace file written to: {trace_file}. Input: {}", fib_input);
 
+    info!("Proving fib({})...", fib_input);
     let now = Instant::now();
     let (output, proof, io_device) = if committed_bytecode {
         let prove_fib = guest::build_prover_committed_fib(program, prover_preprocessing);
-        prove_fib(50)
+        prove_fib(fib_input as u32)
     } else {
         let prove_fib = guest::build_prover_fib(program, prover_preprocessing);
-        prove_fib(50)
+        prove_fib(fib_input as u32)
     };
     info!("Prover runtime: {} s", now.elapsed().as_secs_f64());
     info!(

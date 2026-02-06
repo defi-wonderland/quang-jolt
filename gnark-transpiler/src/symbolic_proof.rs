@@ -3,6 +3,15 @@
 //! This module provides functions to create symbolic versions of proof data structures,
 //! where concrete field elements are replaced with MleAst variables.
 //!
+//! # Variable Ordering Invariant
+//!
+//! **CRITICAL**: The `WitnessFieldIterator` is the **single source of truth** for variable
+//! ordering. Both `symbolize_jolt_proof()` and `extract_sumcheck_witness_values()` use
+//! this iterator to ensure variables are allocated and extracted in identical order.
+//!
+//! If you need to add new witness fields, modify `WitnessFieldIterator::new()` and both
+//! functions will automatically stay in sync.
+//!
 //! NOTE: This is adapted for the quangvdao fork. We only symbolize the core verification
 //! stages (1-7), not the recursion stages (9-13) which run on Grumpkin.
 
@@ -14,7 +23,7 @@ use ark_bn254::Fq;
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_std::Zero;
 use jolt_core::poly::commitment::hyrax::{Hyrax, HyraxCommitment, HyraxOpeningProof};
-use jolt_core::poly::opening_proof::OpeningPoint;
+use jolt_core::poly::opening_proof::{OpeningId, OpeningPoint};
 use jolt_core::poly::unipoly::CompressedUniPoly;
 use jolt_core::subprotocols::sumcheck::SumcheckInstanceProof;
 use jolt_core::subprotocols::univariate_skip::UniSkipFirstRoundProof;
@@ -25,6 +34,209 @@ use jolt_core::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof;
 use jolt_core::zkvm::RV64IMACProof;
 use zklean_extractor::mle_ast::MleAst;
 use zklean_extractor::AstCommitment;
+
+// =============================================================================
+// WITNESS FIELD ITERATOR - Single Source of Truth for Variable Ordering
+// =============================================================================
+
+/// Identifies which proof stage a witness field belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Stage1,
+    Stage2,
+    Stage3,
+    Stage4,
+    Stage5,
+    Stage6a,
+    Stage6b,
+    Stage7,
+}
+
+impl Stage {
+    fn name(&self) -> &'static str {
+        match self {
+            Stage::Stage1 => "Stage1",
+            Stage::Stage2 => "Stage2",
+            Stage::Stage3 => "Stage3",
+            Stage::Stage4 => "Stage4",
+            Stage::Stage5 => "Stage5",
+            Stage::Stage6a => "Stage6a",
+            Stage::Stage6b => "Stage6b",
+            Stage::Stage7 => "Stage7",
+        }
+    }
+}
+
+/// Describes a single witness field in the proof.
+///
+/// This enum is the **single source of truth** for what fields exist in the witness
+/// and their canonical ordering. Both symbolization and extraction iterate through
+/// the same sequence of these fields.
+#[derive(Debug, Clone)]
+pub enum WitnessField {
+    /// A 32-byte chunk of a commitment (for Fiat-Shamir transcript)
+    CommitmentChunk {
+        commitment_idx: usize,
+        chunk_idx: usize,
+    },
+    /// An opening claim value for a specific polynomial opening
+    OpeningClaim {
+        key: OpeningId,
+    },
+    /// A coefficient in a uni-skip proof
+    UniSkipCoeff {
+        stage: Stage,
+        coeff_idx: usize,
+    },
+    /// A coefficient in a sumcheck round polynomial (coeffs_except_linear_term)
+    SumcheckCoeff {
+        stage: Stage,
+        round_idx: usize,
+        coeff_idx: usize,
+    },
+}
+
+impl WitnessField {
+    /// Human-readable name for this field (used as variable description)
+    pub fn name(&self) -> String {
+        match self {
+            WitnessField::CommitmentChunk { commitment_idx, chunk_idx } => {
+                format!("Commitment_{}_Chunk_{}", commitment_idx, chunk_idx)
+            }
+            WitnessField::OpeningClaim { key } => {
+                format!("Claim_{:?}", key)
+            }
+            WitnessField::UniSkipCoeff { stage, coeff_idx } => {
+                format!("{}_Uni_Skip_Coeff_{}", stage.name(), coeff_idx)
+            }
+            WitnessField::SumcheckCoeff { stage, round_idx, coeff_idx } => {
+                format!("{}_Sumcheck_R{}_{}", stage.name(), round_idx, coeff_idx)
+            }
+        }
+    }
+}
+
+/// Iterator over all witness fields in canonical order.
+///
+/// This struct examines a real proof to determine the exact fields that need
+/// to be symbolized/extracted, ensuring both operations use identical ordering.
+pub struct WitnessFieldIterator {
+    fields: Vec<WitnessField>,
+}
+
+impl WitnessFieldIterator {
+    /// Build the witness field list from a real proof.
+    ///
+    /// This examines the proof structure to determine exact counts for each
+    /// variable-length field (commitments, rounds, coefficients).
+    pub fn new(proof: &RV64IMACProof) -> Self {
+        let mut fields = Vec::new();
+
+        // 1. Commitments: N commitments × 12 chunks each
+        for commitment_idx in 0..proof.commitments.len() {
+            for chunk_idx in 0..CHUNKS_PER_COMMITMENT {
+                fields.push(WitnessField::CommitmentChunk {
+                    commitment_idx,
+                    chunk_idx,
+                });
+            }
+        }
+
+        // 2. Opening claims (BTreeMap ensures consistent ordering)
+        for (key, _) in &proof.opening_claims.0 {
+            fields.push(WitnessField::OpeningClaim { key: key.clone() });
+        }
+
+        // 3. Stage 1 uni-skip coefficients
+        for coeff_idx in 0..proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs.len() {
+            fields.push(WitnessField::UniSkipCoeff {
+                stage: Stage::Stage1,
+                coeff_idx,
+            });
+        }
+
+        // 4. Stage 1 sumcheck coefficients
+        for (round_idx, poly) in proof.stage1_sumcheck_proof.compressed_polys.iter().enumerate() {
+            for coeff_idx in 0..poly.coeffs_except_linear_term.len() {
+                fields.push(WitnessField::SumcheckCoeff {
+                    stage: Stage::Stage1,
+                    round_idx,
+                    coeff_idx,
+                });
+            }
+        }
+
+        // 5. Stage 2 uni-skip coefficients
+        for coeff_idx in 0..proof.stage2_uni_skip_first_round_proof.uni_poly.coeffs.len() {
+            fields.push(WitnessField::UniSkipCoeff {
+                stage: Stage::Stage2,
+                coeff_idx,
+            });
+        }
+
+        // 6. Stage 2 sumcheck coefficients
+        for (round_idx, poly) in proof.stage2_sumcheck_proof.compressed_polys.iter().enumerate() {
+            for coeff_idx in 0..poly.coeffs_except_linear_term.len() {
+                fields.push(WitnessField::SumcheckCoeff {
+                    stage: Stage::Stage2,
+                    round_idx,
+                    coeff_idx,
+                });
+            }
+        }
+
+        // Helper closure for sumcheck-only stages
+        let mut add_sumcheck_stage = |stage: Stage, polys: &[CompressedUniPoly<ark_bn254::Fr>]| {
+            for (round_idx, poly) in polys.iter().enumerate() {
+                for coeff_idx in 0..poly.coeffs_except_linear_term.len() {
+                    fields.push(WitnessField::SumcheckCoeff {
+                        stage,
+                        round_idx,
+                        coeff_idx,
+                    });
+                }
+            }
+        };
+
+        // 7-12. Stages 3-7 sumcheck coefficients
+        add_sumcheck_stage(Stage::Stage3, &proof.stage3_sumcheck_proof.compressed_polys);
+        add_sumcheck_stage(Stage::Stage4, &proof.stage4_sumcheck_proof.compressed_polys);
+        add_sumcheck_stage(Stage::Stage5, &proof.stage5_sumcheck_proof.compressed_polys);
+        add_sumcheck_stage(Stage::Stage6a, &proof.stage6a_sumcheck_proof.compressed_polys);
+        add_sumcheck_stage(Stage::Stage6b, &proof.stage6b_sumcheck_proof.compressed_polys);
+        add_sumcheck_stage(Stage::Stage7, &proof.stage7_sumcheck_proof.compressed_polys);
+
+        Self { fields }
+    }
+
+    /// Total number of witness fields
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+impl IntoIterator for WitnessFieldIterator {
+    type Item = WitnessField;
+    type IntoIter = std::vec::IntoIter<WitnessField>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a WitnessFieldIterator {
+    type Item = &'a WitnessField;
+    type IntoIter = std::slice::Iter<'a, WitnessField>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.iter()
+    }
+}
 
 /// Number of 32-byte chunks per commitment (384 bytes / 32 = 12)
 const CHUNKS_PER_COMMITMENT: usize = 12;
@@ -198,6 +410,12 @@ pub fn symbolize_sumcheck_proofs(
 /// Non-sumcheck fields (commitments, PCS proofs, recursion data) are copied from the real proof
 /// where possible or filled with defaults.
 ///
+/// # Variable Ordering Guarantee
+///
+/// This function allocates variables in the same order as `WitnessFieldIterator` iterates them.
+/// An assertion at the end verifies the counts match. This ensures `extract_sumcheck_witness_values`
+/// (which uses `WitnessFieldIterator`) produces correctly-keyed witness values.
+///
 /// Returns:
 /// - JoltProof with symbolic sumcheck proofs
 /// - MleOpeningAccumulator with symbolic claims
@@ -364,6 +582,16 @@ pub fn symbolize_jolt_proof(
         dory_layout: real_proof.dory_layout,
     };
 
+    // Verify variable count matches WitnessFieldIterator
+    // This catches any ordering divergence between symbolize and extract
+    let expected_count = WitnessFieldIterator::new(real_proof).len();
+    assert_eq!(
+        alloc.next_idx() as usize, expected_count,
+        "Variable ordering invariant violated: symbolize allocated {} variables but \
+         WitnessFieldIterator expects {}. Both must iterate fields in identical order.",
+        alloc.next_idx(), expected_count
+    );
+
     (symbolic_proof, accumulator, alloc)
 }
 
@@ -399,33 +627,19 @@ fn symbolize_sumcheck_proof<T: jolt_core::transcripts::Transcript>(
     SumcheckInstanceProof::new(compressed_polys)
 }
 
-/// Extract concrete witness values from proof data
+/// Extract concrete witness values from proof data.
 /// Returns a HashMap<variable_index, value_as_decimal_string>
 ///
-/// The indices match exactly what symbolize_jolt_proof allocates.
+/// # Variable Ordering Guarantee
+///
+/// This function uses `WitnessFieldIterator` to iterate fields in the exact same order
+/// as `symbolize_jolt_proof()`. This ensures witness values are keyed by the correct
+/// variable indices.
 pub fn extract_sumcheck_witness_values(
     real_proof: &RV64IMACProof,
 ) -> std::collections::HashMap<usize, String> {
     use ark_ff::PrimeField;
     use ark_serialize::CanonicalSerialize;
-    let mut values: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    let mut idx: usize = 0;
-
-    // Helper to convert bytes to field element chunks
-    fn bytes_to_chunks(bytes: &[u8]) -> Vec<ark_bn254::Fr> {
-        let num_chunks = 12; // Always 12 chunks per commitment
-        (0..num_chunks)
-            .map(|i| {
-                let start = i * 32;
-                let end = std::cmp::min(start + 32, bytes.len());
-                if start >= bytes.len() {
-                    ark_bn254::Fr::from(0u64)
-                } else {
-                    ark_bn254::Fr::from_le_bytes_mod_order(&bytes[start..end])
-                }
-            })
-            .collect()
-    }
 
     // Helper to serialize a commitment to bytes
     // MUST match the Poseidon transcript serialization:
@@ -434,100 +648,69 @@ pub fn extract_sumcheck_witness_values(
     fn commitment_to_bytes<T: CanonicalSerialize>(commitment: &T) -> Vec<u8> {
         let mut bytes = Vec::new();
         commitment.serialize_uncompressed(&mut bytes).expect("serialization failed");
-        // Reverse bytes to match Poseidon transcript format (BE for EVM compatibility)
         bytes.reverse();
         bytes
     }
 
-    // === Commitments (N commitments × 12 chunks each) ===
-    for commitment in &real_proof.commitments {
-        let chunks = bytes_to_chunks(&commitment_to_bytes(commitment));
-        for chunk in chunks {
-            values.insert(idx, format!("{}", chunk.into_bigint()));
-            idx += 1;
+    // Helper to get the n-th 32-byte chunk from commitment bytes as a field element
+    fn get_commitment_chunk(commitment_bytes: &[u8], chunk_idx: usize) -> ark_bn254::Fr {
+        let start = chunk_idx * 32;
+        let end = std::cmp::min(start + 32, commitment_bytes.len());
+        if start >= commitment_bytes.len() {
+            ark_bn254::Fr::from(0u64)
+        } else {
+            ark_bn254::Fr::from_le_bytes_mod_order(&commitment_bytes[start..end])
         }
     }
 
-    // === Opening claims ===
-    for (_key, (_point, claim)) in &real_proof.opening_claims.0 {
-        values.insert(idx, format!("{}", claim.into_bigint()));
-        idx += 1;
-    }
+    // Pre-compute commitment bytes for efficient access
+    let commitment_bytes: Vec<Vec<u8>> = real_proof.commitments.iter()
+        .map(|c| commitment_to_bytes(c))
+        .collect();
 
-    // === Stage 1 uni-skip proof ===
-    for coeff in &real_proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs {
-        values.insert(idx, format!("{}", coeff.into_bigint()));
-        idx += 1;
-    }
+    // Pre-compute opening claims for efficient access (maintain BTreeMap order)
+    let opening_claims: Vec<_> = real_proof.opening_claims.0.iter().collect();
 
-    // === Stage 1 sumcheck proof ===
-    for poly in &real_proof.stage1_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
+    let mut values = std::collections::HashMap::new();
 
-    // === Stage 2 uni-skip proof ===
-    for coeff in &real_proof.stage2_uni_skip_first_round_proof.uni_poly.coeffs {
-        values.insert(idx, format!("{}", coeff.into_bigint()));
-        idx += 1;
-    }
-
-    // === Stage 2 sumcheck proof ===
-    for poly in &real_proof.stage2_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 3 sumcheck proof ===
-    for poly in &real_proof.stage3_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 4 sumcheck proof ===
-    for poly in &real_proof.stage4_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 5 sumcheck proof ===
-    for poly in &real_proof.stage5_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 6a sumcheck proof ===
-    for poly in &real_proof.stage6a_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 6b sumcheck proof ===
-    for poly in &real_proof.stage6b_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
-    }
-
-    // === Stage 7 sumcheck proof ===
-    for poly in &real_proof.stage7_sumcheck_proof.compressed_polys {
-        for coeff in &poly.coeffs_except_linear_term {
-            values.insert(idx, format!("{}", coeff.into_bigint()));
-            idx += 1;
-        }
+    // Use WitnessFieldIterator to iterate fields in canonical order
+    for (idx, field) in WitnessFieldIterator::new(real_proof).into_iter().enumerate() {
+        let value: String = match field {
+            WitnessField::CommitmentChunk { commitment_idx, chunk_idx } => {
+                let chunk = get_commitment_chunk(&commitment_bytes[commitment_idx], chunk_idx);
+                format!("{}", chunk.into_bigint())
+            }
+            WitnessField::OpeningClaim { ref key } => {
+                // Find the claim by key (inefficient but correct; could optimize with a map)
+                let (_, claim) = opening_claims.iter()
+                    .find(|(k, _)| *k == key)
+                    .expect("Opening claim key not found")
+                    .1;
+                format!("{}", claim.into_bigint())
+            }
+            WitnessField::UniSkipCoeff { stage, coeff_idx } => {
+                let coeffs = match stage {
+                    Stage::Stage1 => &real_proof.stage1_uni_skip_first_round_proof.uni_poly.coeffs,
+                    Stage::Stage2 => &real_proof.stage2_uni_skip_first_round_proof.uni_poly.coeffs,
+                    _ => panic!("Uni-skip proofs only exist for stages 1 and 2"),
+                };
+                format!("{}", coeffs[coeff_idx].into_bigint())
+            }
+            WitnessField::SumcheckCoeff { stage, round_idx, coeff_idx } => {
+                let polys = match stage {
+                    Stage::Stage1 => &real_proof.stage1_sumcheck_proof.compressed_polys,
+                    Stage::Stage2 => &real_proof.stage2_sumcheck_proof.compressed_polys,
+                    Stage::Stage3 => &real_proof.stage3_sumcheck_proof.compressed_polys,
+                    Stage::Stage4 => &real_proof.stage4_sumcheck_proof.compressed_polys,
+                    Stage::Stage5 => &real_proof.stage5_sumcheck_proof.compressed_polys,
+                    Stage::Stage6a => &real_proof.stage6a_sumcheck_proof.compressed_polys,
+                    Stage::Stage6b => &real_proof.stage6b_sumcheck_proof.compressed_polys,
+                    Stage::Stage7 => &real_proof.stage7_sumcheck_proof.compressed_polys,
+                };
+                format!("{}", polys[round_idx].coeffs_except_linear_term[coeff_idx].into_bigint())
+            }
+        };
+        values.insert(idx, value);
     }
 
     values

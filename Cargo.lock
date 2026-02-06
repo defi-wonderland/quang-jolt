@@ -1379,6 +1379,7 @@ dependencies = [
  "ark-grumpkin",
  "ark-serialize",
  "ark-std",
+ "clap",
  "common",
  "jolt-core",
  "light-poseidon",
