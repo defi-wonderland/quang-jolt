@@ -44,7 +44,7 @@ impl Drop for CycleMarkerGuard {
 /// Pedersen generators for commitment scheme
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PedersenGenerators<G: CurveGroup> {
-    pub(crate) generators: Vec<G::Affine>,
+    pub generators: Vec<G::Affine>,
 }
 
 impl<G: CurveGroup> PedersenGenerators<G> {

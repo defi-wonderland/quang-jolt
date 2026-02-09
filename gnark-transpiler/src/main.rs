@@ -51,6 +51,10 @@ struct Args {
     /// Output directory for generated Go files
     #[arg(long, short = 'o', default_value = "go")]
     output_dir: PathBuf,
+
+    /// Enable verbose output (shows sumcheck rounds and other debug info)
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 fn main() {
@@ -75,10 +79,18 @@ fn main() {
     println!("  recursion_proof.dense_commitment.row_commitments.len(): {}",
         real_proof.recursion_proof.dense_commitment.row_commitments.len());
 
-    // Print Stage 3 sumcheck details
-    // Stage 3 has 10 rounds with 3 coefficients each
-    println!("\n=== Stage 3 Sumcheck Details ===");
-    println!("  Rounds: {}", real_proof.stage3_sumcheck_proof.compressed_polys.len());
+    // Print sumcheck details for all stages (if verbose)
+    if args.verbose {
+        println!("\n=== Sumcheck Details (All Stages) ===");
+        println!("  Stage 1 rounds: {}", real_proof.stage1_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 2 rounds: {}", real_proof.stage2_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 3 rounds: {}", real_proof.stage3_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 4 rounds: {}", real_proof.stage4_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 5 rounds: {}", real_proof.stage5_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 6a rounds: {}", real_proof.stage6a_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 6b rounds: {}", real_proof.stage6b_sumcheck_proof.compressed_polys.len());
+        println!("  Stage 7 rounds: {}", real_proof.stage7_sumcheck_proof.compressed_polys.len());
+    }
 
     // Load io_device
     println!("\nLoading io_device from: {:?}", args.io_device);
@@ -488,26 +500,13 @@ fn extract_hyrax_witness(
     println!("  Identity row commitments (filtered out): {}", identity_count);
     println!("  Non-identity row commitments: {}", non_identity_row_commitments.len());
 
-    // Generators - regenerate using the same deterministic seed
-    // Since PedersenGenerators.generators is pub(crate), we regenerate them
-    use ark_grumpkin::Projective as GrumpkinProjective;
-
+    // Generators - use from preprocessing instead of regenerating
     let (_, gen_size) = matrix_dimensions(dense_num_vars, 1);
 
-    // Regenerate generators inline since we know the algorithm
-    use ark_std::rand::SeedableRng;
-    use ark_std::UniformRand;
-    use ark_ec::CurveGroup;
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(
-        b"Jolt v1 Hyrax generators"
-            .iter()
-            .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64)),
-    );
-    let generators: Vec<[String; 2]> = (0..gen_size)
-        .map(|_| {
-            let point: ark_grumpkin::Affine = GrumpkinProjective::rand(&mut rng).into_affine();
-            grumpkin_point_to_strings(&point)
-        })
+    // Use generators from preprocessing
+    let generators: Vec<[String; 2]> = preprocessing.hyrax_recursion_setup.generators[..gen_size]
+        .iter()
+        .map(|p| grumpkin_point_to_strings(p))
         .collect();
 
     // Calculate matrix dimensions to get L_size and R_size
@@ -521,15 +520,6 @@ fn extract_hyrax_witness(
     // For now, we'll extract what we can from the proof structure
     // The opening point is built from sumcheck challenges during verification
     // We need to look at the stage4 (jagged sumcheck) which produces the r_dense point
-
-    // Get the stage4 sumcheck proof - the challenges from this become r_dense
-    let stage4_rounds = &recursion_proof.stage4_proof.compressed_polys;
-    let num_dense_vars_from_proof = stage4_rounds.len();
-
-    println!("  dense_num_vars from metadata: {}", dense_num_vars);
-    println!("  Stage4 rounds (num_dense_vars): {}", num_dense_vars_from_proof);
-    println!("  L_size (left eq poly size): {}", l_size);
-    println!("  R_size (right eq poly size): {}", r_size);
 
     // The opening point is derived from transcript challenges during verification
     // For witness extraction, we need to re-run the transcript to get these values
