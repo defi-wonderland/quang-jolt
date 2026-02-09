@@ -635,7 +635,7 @@ fn symbolize_sumcheck_proof<T: jolt_core::transcripts::Transcript>(
 /// This function uses `WitnessFieldIterator` to iterate fields in the exact same order
 /// as `symbolize_jolt_proof()`. This ensures witness values are keyed by the correct
 /// variable indices.
-pub fn extract_sumcheck_witness_values(
+pub fn extract_witness_values(
     real_proof: &RV64IMACProof,
 ) -> std::collections::HashMap<usize, String> {
     use ark_ff::PrimeField;

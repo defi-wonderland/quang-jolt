@@ -45,7 +45,7 @@ pub mod witness;
 
 pub use ast_json::Stage1AstJson;
 pub use codegen::{
-    generate_circuit_from_bundle, MemoizedCodeGen, sanitize_go_name,
+    generate_circuit_from_bundle, generate_stages_circuit, MemoizedCodeGen, sanitize_go_name,
 };
 pub use ast_commitment_scheme::AstCommitmentScheme;
 pub use mle_opening_accumulator::MleOpeningAccumulator;

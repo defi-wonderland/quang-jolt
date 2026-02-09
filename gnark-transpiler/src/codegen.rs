@@ -660,3 +660,109 @@ pub fn sanitize_go_name(name: &str) -> String {
         .collect::<Vec<_>>()
         .join("_")
 }
+
+/// Generate Gnark circuit code from accumulated assertions
+///
+/// **Per-Assertion CSE**: To fix the node aliasing bug where structurally identical
+/// expressions from different assertions get merged, we now use per-assertion CSE contexts.
+/// Each assertion gets its own CSE namespace (cse_0_0, cse_0_1 for assertion 0, etc.).
+pub fn generate_stages_circuit(
+    assertions: &[MleAst],
+    var_names: &HashMap<u16, String>,
+    circuit_name: &str,
+) -> String {
+    // Per-assertion CSE: generate each assertion with its own CSE context
+    // This avoids the node aliasing bug where structurally identical expressions
+    // from different assertions get incorrectly merged.
+    let mut all_bindings_code = String::new();
+    let mut assertion_exprs: Vec<String> = Vec::new();
+    let mut all_vars: BTreeSet<u16> = BTreeSet::new();
+
+    for (assertion_idx, assertion) in assertions.iter().enumerate() {
+        // Create a fresh codegen context for this assertion with per-assertion CSE naming
+        let mut codegen = MemoizedCodeGen::with_var_names_and_constraint_idx(
+            var_names.clone(),
+            assertion_idx,
+        );
+
+        // Count references within this assertion only
+        codegen.count_refs(assertion.root());
+
+        // Generate expression for this assertion
+        let expr = codegen.generate_expr(assertion.root());
+        assertion_exprs.push(expr);
+
+        // Collect vars used in this assertion
+        all_vars.extend(codegen.vars().iter());
+
+        // Collect bindings for this assertion (already have prefixed names from codegen)
+        let constraint_bindings = codegen.bindings_code();
+        if !constraint_bindings.is_empty() {
+            all_bindings_code.push_str(&format!("\t// CSE bindings for assertion {}\n", assertion_idx));
+            all_bindings_code.push_str(&constraint_bindings);
+        }
+    }
+
+    let bindings_code = all_bindings_code;
+    let vars = &all_vars;
+
+    let mut output = String::new();
+
+    // Package and imports
+    output.push_str("package jolt_verifier\n\n");
+    output.push_str("import (\n");
+    output.push_str("\t\"github.com/consensys/gnark/frontend\"\n");
+    if bindings_code.contains("poseidon.Hash")
+        || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash"))
+    {
+        output.push_str("\t\"jolt_verifier/poseidon\"\n");
+    }
+    output.push_str(")\n\n");
+
+    // Note: bigInt helper is defined in helpers.go
+
+    // Circuit struct
+    output.push_str(&format!("type {} struct {{\n", circuit_name));
+
+    // Add input variables - use sanitized names
+    for var_idx in vars.iter() {
+        let name = var_names
+            .get(var_idx)
+            .map(|n| sanitize_go_name(n))
+            .unwrap_or_else(|| format!("X{}", var_idx));
+        output.push_str(&format!(
+            "\t{} frontend.Variable `gnark:\",public\"`\n",
+            name
+        ));
+    }
+
+    output.push_str("}\n\n");
+
+    // Define method
+    output.push_str(&format!(
+        "func (circuit *{}) Define(api frontend.API) error {{\n",
+        circuit_name
+    ));
+
+    // CSE bindings
+    if !bindings_code.is_empty() {
+        output.push_str("\t// Memoized subexpressions (CSE)\n");
+        output.push_str(&bindings_code);
+        output.push_str("\n");
+    }
+
+    // Generate assertions - each expression must equal zero
+    output.push_str("\t// Verification assertions (each must equal 0)\n");
+    for (i, expr) in assertion_exprs.iter().enumerate() {
+        output.push_str(&format!("\ta{} := {}\n", i, expr));
+        output.push_str(&format!("\tapi.AssertIsEqual(a{}, 0)\n", i));
+        if (i + 1) % 100 == 0 {
+            output.push_str(&format!("\t// ... assertion {} of {}\n", i + 1, assertion_exprs.len()));
+        }
+    }
+
+    output.push_str("\n\treturn nil\n");
+    output.push_str("}\n");
+
+    output
+}
