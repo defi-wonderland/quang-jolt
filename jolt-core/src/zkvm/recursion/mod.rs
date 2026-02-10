@@ -95,6 +95,24 @@ pub use witness::{
     DoryRecursionWitness, G1ScalarMulWitness, GTExpWitness, GTMulWitness, WitnessData,
 };
 
+/// Convert an Fq element to a generic field F.
+/// Supports full 256-bit Fq values by decomposing into low + high × 2^128.
+/// Used to embed curve-specific constants (base points) into symbolic execution.
+pub fn convert_fq_to_field<F: crate::field::JoltField>(fq: ark_bn254::Fq) -> F {
+    use ark_ff::PrimeField;
+    let limbs = fq.into_bigint().0; // [u64; 4]
+    let low = limbs[0] as u128 | ((limbs[1] as u128) << 64);
+    let high = limbs[2] as u128 | ((limbs[3] as u128) << 64);
+    if high == 0 {
+        F::from_u128(low)
+    } else {
+        // fq = low + high × 2^128
+        let two_64 = F::from_u128(1u128 << 64);
+        let two_128 = two_64 * two_64;
+        F::from_u128(low) + F::from_u128(high) * two_128
+    }
+}
+
 /// Max `dense_num_vars` for recursion Hyrax setup.
 ///
 /// This bounds the size of the dense polynomial opened via Hyrax in the recursion proof.

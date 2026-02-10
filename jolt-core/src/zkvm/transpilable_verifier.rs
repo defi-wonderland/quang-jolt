@@ -21,6 +21,7 @@ use crate::poly::opening_proof::{
     compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator, OpeningId, OpeningPoint,
     PolynomialId, SumcheckId, VerifierOpeningAccumulator,
 };
+use crate::zkvm::recursion::recursion_prover::RecursionProof;
 use crate::zkvm::recursion::recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::subprotocols::sumcheck::BatchedSumcheck;
@@ -128,6 +129,10 @@ pub struct TranspilableVerifier<
     pub opening_accumulator: A,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
+    /// Symbolic recursion proof for stage 8 verification.
+    /// None for real verification (uses self.proof.recursion_proof with Hyrax).
+    /// Some for symbolic transpilation (uses MleAst version).
+    pub symbolic_recursion_proof: Option<RecursionProof<F, ProofTranscript, PCS>>,
 }
 
 // =============================================================================
@@ -203,6 +208,7 @@ impl<
             opening_accumulator,
             spartan_key,
             one_hot_params,
+            symbolic_recursion_proof: None,
         })
     }
 }
@@ -230,6 +236,7 @@ impl<
         trusted_advice_commitment: Option<PCS::Commitment>,
         transcript: ProofTranscript,
         opening_accumulator: A,
+        symbolic_recursion_proof: Option<RecursionProof<F, ProofTranscript, PCS>>,
     ) -> Self {
         let spartan_key = UniformSpartanKey::new(proof.trace_length.next_power_of_two());
         let one_hot_params =
@@ -244,17 +251,22 @@ impl<
             opening_accumulator,
             spartan_key,
             one_hot_params,
+            symbolic_recursion_proof,
         }
     }
 
-    /// Verify the Jolt proof (stages 1-7, all sumcheck stages).
+    /// Verify the Jolt proof (stages 1-8 + recursion sumchecks).
     ///
-    /// Stage 8 (PCS batch opening) is not called here because it requires
-    /// concrete PCS types (DoryGlobals, commitments map, PCS::verify).
-    /// For Gnark transpilation, Stage 8 is handled natively in Go.
-    /// See `verify_stage8()` in the VerifierOpeningAccumulator impl block.
+    /// Stages 1-7 run all sumcheck stages. Stage 8 (verify_stage8_wo_pcs) runs
+    /// claim collection, transcript bridge, and recursion sumchecks when
+    /// symbolic_recursion_proof is present. PCS openings (Dory + Hyrax) are
+    /// handled natively in Go.
     #[tracing::instrument(skip_all)]
-    pub fn verify(mut self) -> Result<(), anyhow::Error> {
+    pub fn verify(mut self) -> Result<(), anyhow::Error>
+    where
+        F: allocative::Allocative,
+        A: Default,
+    {
         let _pprof_verify = pprof_scope!("verify");
 
         fiat_shamir_preamble(
@@ -288,6 +300,10 @@ impl<
         self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
         self.verify_stage7()?;
         // self.verify_stage8_with_recursion()?;  // PCS-specific — handled natively in Go
+        if self.symbolic_recursion_proof.is_some() {
+            self.verify_stage8_wo_pcs()?;
+        }
+        // self.verify_pcs();  // PCS openings handled natively in Go
 
         Ok(())
     }
@@ -595,6 +611,235 @@ impl<
             &mut self.transcript,
         )
         .context("Stage 7")?;
+
+        Ok(())
+    }
+
+    /// Stage 8 without PCS: claim collection + transcript bridge + recursion sumchecks.
+    ///
+    /// This is the transpilable portion of stage 8. It:
+    /// 1. Collects all opening claims from the accumulator
+    /// 2. Feeds claims into the transcript and samples gamma powers
+    /// 3. Samples gamma/delta challenges (after Dory IPA boundary)
+    /// 4. Appends the dense commitment to the transcript
+    /// 5. Runs recursion sumcheck verification (stages 1-5 of recursion SNARK)
+    ///
+    /// PCS operations (Dory verify_with_hint + Hyrax opening) are handled natively in Go.
+    #[tracing::instrument(skip_all, name = "verify_stage8_wo_pcs")]
+    fn verify_stage8_wo_pcs(&mut self) -> Result<(), anyhow::Error>
+    where
+        F: allocative::Allocative,
+        A: Default,
+    {
+        let symbolic_proof = self
+            .symbolic_recursion_proof
+            .as_ref()
+            .expect("verify_stage8_wo_pcs requires symbolic_recursion_proof");
+
+        // === 1. CLAIM COLLECTION (from verify_stage8_with_pcs_hint) ===
+        let claims = {
+            let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::InstructionRa(0),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            let log_k_chunk = self.one_hot_params.log_k_chunk;
+            let r_address_stage7 = &opening_point.r[..log_k_chunk];
+
+            let mut polynomial_claims = Vec::new();
+
+            // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
+            let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            );
+            let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            );
+
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+            polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+            polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
+
+            // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
+            for i in 0..self.one_hot_params.instruction_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::InstructionRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.bytecode_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::BytecodeRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.ram_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
+            }
+
+            // Advice polynomials
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::TrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::UntrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
+            // Bytecode chunk polynomials
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (bytecode_point, _) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(0),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
+
+                let num_chunks = total_lanes().div_ceil(self.one_hot_params.k_chunk);
+                for i in 0..num_chunks {
+                    let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(i),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                    polynomial_claims.push((
+                        CommittedPolynomial::BytecodeChunk(i),
+                        claim * lagrange_factor,
+                    ));
+                }
+            }
+
+            // Program-image polynomial
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (prog_point, prog_claim) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::ProgramImageInit,
+                        SumcheckId::ProgramImageClaimReduction,
+                    );
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::ProgramImageInit,
+                    prog_claim * lagrange_factor,
+                ));
+            }
+
+            let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
+            claims
+        };
+
+        // === 2. TRANSCRIPT: append claims + sample gamma powers ===
+        self.transcript.append_scalars(&claims);
+        self.transcript.debug_state("after_append_claims");
+        let _gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+        self.transcript.debug_state("after_gamma_powers");
+
+        // === 2.5. DORY IPA TRANSCRIPT REPLAY ===
+        // Replay Dory IPA bytes through the Poseidon sponge via thread-local tunneling.
+        // The ops were pre-loaded by main.rs before verify(). Each Absorb op sets
+        // pending u16 var indices that PoseidonAstTranscript::append_bytes consumes.
+        if let Some(mut ops) = crate::zkvm::dory_replay::take_dory_replay_ops() {
+            while let Some(op) = ops.pop_front() {
+                match op {
+                    crate::zkvm::dory_replay::DoryReplayOp::Absorb { byte_size, var_indices } => {
+                        crate::zkvm::dory_replay::set_pending_dory_absorb_indices(var_indices);
+                        self.transcript.append_bytes(&vec![0u8; byte_size]);
+                    }
+                    crate::zkvm::dory_replay::DoryReplayOp::Squeeze => {
+                        let _: F = self.transcript.challenge_scalar();
+                    }
+                }
+            }
+        }
+
+        self.transcript.debug_state("after_dory_replay");
+
+        // === 3. gamma/delta challenges ===
+        let _gamma: F = self.transcript.challenge_scalar();
+        let _delta: F = self.transcript.challenge_scalar();
+        self.transcript.debug_state("after_gamma_delta");
+
+        // === 4. Dense commitment ===
+        // Use pre-serialized bytes from thread-local (set by main.rs) if available,
+        // because the symbolic AstCommitment::default() doesn't contain the real bytes.
+        // Format matches PoseidonTranscript::append_serializable: uncompressed + reversed.
+        if let Some(dense_bytes) = crate::zkvm::dory_replay::take_dense_commitment_bytes() {
+            self.transcript.append_bytes(&dense_bytes);
+        } else {
+            self.transcript
+                .append_serializable(&self.proof.recursion_proof.dense_commitment);
+        }
+
+        self.transcript.debug_state("after_dense_commitment");
+
+        // === 5. Build RecursionVerifier from metadata ===
+        let metadata = &self.proof.stage10_recursion_metadata;
+        let verifier_input = {
+            let constraint_types = metadata.constraint_types.clone();
+            let num_constraints = constraint_types.len();
+            let num_constraints_padded = num_constraints.next_power_of_two();
+
+            use crate::zkvm::recursion::constraints_sys::PolyType;
+            let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
+            let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
+            let num_constraint_vars = 11;
+            let num_vars = num_s_vars + num_constraint_vars;
+
+            RecursionVerifierInput {
+                constraint_types,
+                num_vars,
+                num_constraint_vars,
+                num_s_vars,
+                num_constraints,
+                num_constraints_padded,
+                jagged_bijection: metadata.jagged_bijection.clone(),
+                jagged_mapping: metadata.jagged_mapping.clone(),
+                matrix_rows: metadata.matrix_rows.clone(),
+                gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
+                g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
+                g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
+            }
+        };
+
+        let recursion_verifier = RecursionVerifier::<Fq>::new(verifier_input);
+
+        // === 6. RECURSION SUMCHECKS ===
+        self.transcript.debug_state("before_recursion_sumchecks");
+        let mut recursion_accumulator = A::default();
+        recursion_verifier
+            .verify_sumchecks::<F, ProofTranscript, A>(
+                &symbolic_proof.stage1_proof,
+                &symbolic_proof.stage2_proof,
+                symbolic_proof.stage3_m_eval,
+                &symbolic_proof.stage4_proof,
+                &symbolic_proof.stage5_proof,
+                &mut self.transcript,
+                &mut recursion_accumulator,
+            )
+            .map_err(|e| anyhow::anyhow!("Recursion sumchecks failed: {e:?}"))?;
 
         Ok(())
     }

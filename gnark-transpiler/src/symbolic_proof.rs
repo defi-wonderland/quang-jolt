@@ -29,8 +29,7 @@ use jolt_core::poly::opening_proof::{OpeningId, OpeningPoint};
 use jolt_core::poly::unipoly::CompressedUniPoly;
 use jolt_core::subprotocols::sumcheck::SumcheckInstanceProof;
 use jolt_core::subprotocols::univariate_skip::UniSkipFirstRoundProof;
-use jolt_core::zkvm::proof_serialization::{JoltProof, Claims, RecursionConstraintMetadata};
-use jolt_core::zkvm::recursion::bijection::{VarCountJaggedBijection, ConstraintMapping};
+use jolt_core::zkvm::proof_serialization::{JoltProof, Claims};
 use jolt_core::zkvm::recursion::recursion_prover::RecursionProof;
 use jolt_core::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof;
 use jolt_core::zkvm::RV64IMACProof;
@@ -399,6 +398,15 @@ impl VarAllocator {
         MleAst::from_var(idx)
     }
 
+    /// Allocate a variable and return its raw u16 index.
+    /// Used when only the index is needed (e.g., for Dory IPA replay ops).
+    pub fn alloc_idx(&mut self, description: &str) -> u16 {
+        let idx = self.next_idx;
+        self.descriptions.push((idx, description.to_string()));
+        self.next_idx += 1;
+        idx
+    }
+
     pub fn alloc_n(&mut self, n: usize, prefix: &str) -> Vec<MleAst> {
         (0..n)
             .map(|i| self.alloc(&format!("{}_{}", prefix, i)))
@@ -651,17 +659,8 @@ pub fn symbolize_jolt_proof(
         "stage7_sumcheck",
     );
 
-    // Build empty recursion metadata (stages 8+ not used in transpilation)
-    let empty_recursion_metadata = RecursionConstraintMetadata {
-        constraint_types: vec![],
-        jagged_bijection: VarCountJaggedBijection::default(),
-        jagged_mapping: ConstraintMapping::default(),
-        matrix_rows: vec![],
-        dense_num_vars: 0,
-        gt_exp_public_inputs: vec![],
-        g1_scalar_mul_public_inputs: vec![],
-        g2_scalar_mul_public_inputs: vec![],
-    };
+    // Use real recursion metadata (needed by verify_stage8_wo_pcs to build RecursionVerifier)
+    let recursion_metadata = real_proof.stage10_recursion_metadata.clone();
 
     // Build empty recursion proof (stages 11-13 not used in transpilation)
     // RecursionProof in JoltProof is typed as RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>
@@ -700,9 +699,9 @@ pub fn symbolize_jolt_proof(
         stage7_sumcheck_proof: stage7_sumcheck,
         // PCS-specific fields - empty since we don't verify these symbolically
         stage8_opening_proof: AstProof::default(),
-        stage8_combine_hint: None,
+        stage8_combine_hint: real_proof.stage8_combine_hint.clone(),
         stage9_pcs_hint: None,
-        stage10_recursion_metadata: empty_recursion_metadata,
+        stage10_recursion_metadata: recursion_metadata,
         recursion_proof,
         trusted_advice_val_evaluation_proof: None,
         trusted_advice_val_final_proof: None,

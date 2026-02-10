@@ -34,16 +34,15 @@ use ark_serialize::CanonicalSerialize;
 use jolt_core::field::JoltField;
 use jolt_core::transcripts::Transcript;
 use std::borrow::Borrow;
+use jolt_core::zkvm::dory_replay::take_pending_dory_absorb_indices;
 use zklean_extractor::mle_ast::{set_pending_challenge, take_pending_append, take_pending_commitment_chunks, MleAst};
 
 /// Convert 32 bytes (little-endian) to a [u64; 4] scalar.
-/// This matches Fr::from_le_bytes_mod_order behavior for the full 256 bits.
+/// Uses `from_le_bytes_mod_order` to match the real PoseidonTranscript exactly:
+/// values exceeding the BN254 Fr modulus are reduced mod p.
 fn bytes_to_scalar(bytes: &[u8; 32]) -> [u64; 4] {
-    let mut limbs = [0u64; 4];
-    for (i, chunk) in bytes.chunks(8).enumerate() {
-        limbs[i] = u64::from_le_bytes(chunk.try_into().unwrap());
-    }
-    limbs
+    use ark_ff::PrimeField;
+    ark_bn254::Fr::from_le_bytes_mod_order(bytes).into_bigint().0
 }
 
 /// Poseidon transcript for symbolic execution.
@@ -207,6 +206,14 @@ impl Transcript for PoseidonAstTranscript {
     }
 
     fn append_bytes(&mut self, bytes: &[u8]) {
+        // Check for pending Dory IPA symbolic variable indices (thread-local tunneling).
+        // If present, reconstruct MleAst::Var from u16 indices and use as symbolic chunks.
+        if let Some(var_indices) = take_pending_dory_absorb_indices() {
+            let symbolic_chunks: Vec<MleAst> = var_indices.into_iter().map(MleAst::from_var).collect();
+            self.append_field_elements(&symbolic_chunks);
+            return;
+        }
+
         // Hash all bytes using Poseidon with domain separation via n_rounds.
         // First chunk: hash(state, n_rounds, chunk), includes domain separator.
         // Subsequent chunks: hash(prev, 0, chunk), chained but without redundant n_rounds.
@@ -431,8 +438,8 @@ impl Transcript for PoseidonAstTranscript {
         vec![F::zero(); len]
     }
 
-    fn debug_state(&self, _label: &str) {
-        // No-op: debug output disabled for transpiler
+    fn debug_state(&self, label: &str) {
+        eprintln!("SYMBOLIC [{}]: n_rounds={}", label, self.n_rounds);
     }
 }
 

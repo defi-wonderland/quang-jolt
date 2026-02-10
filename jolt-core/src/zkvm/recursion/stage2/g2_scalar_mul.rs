@@ -188,7 +188,7 @@ impl<F: JoltField> G2ScalarMulValues<F> {
     /// Generic over F to support both concrete and symbolic execution.
     ///
     /// Base points (x_p, y_p) are provided as (c0, c1) component pairs.
-    fn eval_constraint_generic(
+    fn eval_constraint(
         &self,
         bit: F,
         x_p_c0: F,
@@ -369,104 +369,8 @@ impl<F: JoltField> G2ScalarMulValues<F> {
     }
 }
 
-// Concrete Fq implementation using native Fq2 arithmetic
-impl G2ScalarMulValues<Fq> {
-    /// Evaluate batched constraint using native Fq2 arithmetic (for prover)
-    fn eval_constraint(&self, bit: Fq, x_p: Fq2, y_p: Fq2, delta: Fq) -> Fq {
-        // Reconstruct Fq2 values
-        let x_a = Fq2::new(self.x_a_c0, self.x_a_c1);
-        let y_a = Fq2::new(self.y_a_c0, self.y_a_c1);
-        let x_t = Fq2::new(self.x_t_c0, self.x_t_c1);
-        let y_t = Fq2::new(self.y_t_c0, self.y_t_c1);
-        let x_a_next = Fq2::new(self.x_a_next_c0, self.x_a_next_c1);
-        let y_a_next = Fq2::new(self.y_a_next_c0, self.y_a_next_c1);
 
-        // Fq2 constants
-        let one2 = Fq2::one();
-        let two2 = Fq2::new(Fq::from(2u64), Fq::zero());
-        let three2 = Fq2::new(Fq::from(3u64), Fq::zero());
-        let four2 = Fq2::new(Fq::from(4u64), Fq::zero());
-        let nine2 = Fq2::new(Fq::from(9u64), Fq::zero());
-        let bit2 = Fq2::new(bit, Fq::zero());
-        let ind_t2 = Fq2::new(self.t_indicator, Fq::zero());
-
-        // C1: 4y_A²(x_T + 2x_A) - 9x_A⁴
-        let y_a_sq = y_a * y_a;
-        let x_a_sq = x_a * x_a;
-        let c1 = four2 * y_a_sq * (x_t + two2 * x_a) - nine2 * x_a_sq * x_a_sq;
-
-        // C2: 3x_A²(x_T - x_A) + 2y_A(y_T + y_A)
-        let c2 = three2 * x_a_sq * (x_t - x_a) + two2 * y_a * (y_t + y_a);
-
-        // C3: Conditional addition x-coord
-        let c3_skip = (one2 - bit2) * (x_a_next - x_t);
-        let c3_infinity = bit2 * ind_t2 * (x_a_next - x_p);
-        let x_diff = x_p - x_t;
-        let y_diff = y_p - y_t;
-        let chord_x = (x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
-        let c3_add = bit2 * (one2 - ind_t2) * chord_x;
-        let c3 = c3_skip + c3_infinity + c3_add;
-
-        // C4: Conditional addition y-coord
-        let c4_skip = (one2 - bit2) * (y_a_next - y_t);
-        let c4_infinity = bit2 * ind_t2 * (y_a_next - y_p);
-        let chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next);
-        let c4_add = bit2 * (one2 - ind_t2) * chord_y;
-        let c4 = c4_skip + c4_infinity + c4_add;
-
-        // C5: ind_A * (1 - ind_T)
-        let one = Fq::one();
-        let c5 = self.a_indicator * (one - self.t_indicator);
-
-        // C6: ind_T * x_T (c0,c1), ind_T * y_T (c0,c1)
-        let c6_xt_c0 = self.t_indicator * self.x_t_c0;
-        let c6_xt_c1 = self.t_indicator * self.x_t_c1;
-        let c6_yt_c0 = self.t_indicator * self.y_t_c0;
-        let c6_yt_c1 = self.t_indicator * self.y_t_c1;
-
-        // Batch with powers of delta (13 terms)
-        let d2 = delta * delta;
-        let d3 = d2 * delta;
-        let d4 = d3 * delta;
-        let d5 = d4 * delta;
-        let d6 = d5 * delta;
-        let d7 = d6 * delta;
-        let d8 = d7 * delta;
-        let d9 = d8 * delta;
-        let d10 = d9 * delta;
-        let d11 = d10 * delta;
-        let d12 = d11 * delta;
-
-        c1.c0
-            + delta * c1.c1
-            + d2 * c2.c0
-            + d3 * c2.c1
-            + d4 * c3.c0
-            + d5 * c3.c1
-            + d6 * c4.c0
-            + d7 * c4.c1
-            + d8 * c5
-            + d9 * c6_xt_c0
-            + d10 * c6_xt_c1
-            + d11 * c6_yt_c0
-            + d12 * c6_yt_c1
-    }
-}
-
-/// Convert an Fq element to a generic field F.
-/// Used to embed curve-specific constants (base points) into symbolic execution.
-fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
-    use ark_ff::PrimeField;
-    let bytes = fq.into_bigint().0;
-    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
-    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
-    if high == 0 {
-        F::from_u128(low)
-    } else {
-        // For large values, use the low bits
-        F::from_u128(low)
-    }
-}
+use super::super::convert_fq_to_field;
 
 // =============================================================================
 // Prover Spec
@@ -619,7 +523,7 @@ impl ConstraintListProverSpec<Fq, DEGREE> for G2ScalarMulProverSpec {
         let bit = public_evals[0][eval_index];
         let (x_p, y_p) = self.base_points[instance];
         let delta = term_batch_coeff.expect("requires term_batch_coeff");
-        vals.eval_constraint(bit, x_p, y_p, delta)
+        vals.eval_constraint(bit, x_p.c0, x_p.c1, y_p.c0, y_p.c1, delta)
     }
 }
 
@@ -697,7 +601,7 @@ impl<F: JoltField> ConstraintListVerifierSpec<F, DEGREE> for G2ScalarMulVerifier
         let y_p_c0: F = convert_fq_to_field(y_p_fq2.c0);
         let y_p_c1: F = convert_fq_to_field(y_p_fq2.c1);
         let delta = term_batch_coeff.expect("requires term_batch_coeff");
-        vals.eval_constraint_generic(bit, x_p_c0, x_p_c1, y_p_c0, y_p_c1, delta)
+        vals.eval_constraint(bit, x_p_c0, x_p_c1, y_p_c0, y_p_c1, delta)
     }
 }
 

@@ -235,40 +235,11 @@ pub struct DirectEvaluationVerifier<F: JoltField> {
     pub r_x: Vec<F::Challenge>,
 }
 
-impl DirectEvaluationVerifier<Fq> {
-    /// Create a new verifier for real verification (Fq)
-    ///
-    /// Note: `r_x` should be the challenges from Stage 2, converted to field elements
-    /// and back. This method accepts `Vec<Fq>` for backward compatibility.
-    pub fn new(params: DirectEvaluationParams, virtual_claims: Vec<Fq>, r_x: Vec<Fq>) -> Self {
-        // Convert r_x from Fq to Fq::Challenge
-        // For Fq, Challenge = Mont254BitChallenge<Fq>
-        let r_x_challenges: Vec<<Fq as JoltField>::Challenge> = r_x.iter().map(|f| (*f).into()).collect();
-        Self {
-            params,
-            virtual_claims,
-            r_x: r_x_challenges,
-        }
-    }
-
-    /// Run the verifier protocol (non-generic convenience method)
-    pub fn verify<T: Transcript>(
-        &self,
-        transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        m_eval_claimed: Fq,
-    ) -> Result<Vec<Fq>, Stage2Error> {
-        // Convert the result from Vec<Fq::Challenge> to Vec<Fq>
-        let challenges = self.verify_generic(transcript, accumulator, m_eval_claimed)?;
-        Ok(challenges.into_iter().map(|c| c.into()).collect())
-    }
-}
-
 impl<F: JoltField> DirectEvaluationVerifier<F> {
-    /// Create a new verifier (generic)
+    /// Create a new verifier.
     ///
     /// Takes `r_x` as challenges since that's how they come from sumcheck.
-    pub fn new_generic(
+    pub fn new(
         params: DirectEvaluationParams,
         virtual_claims: Vec<F>,
         r_x: Vec<F::Challenge>,
@@ -287,7 +258,7 @@ impl<F: JoltField> DirectEvaluationVerifier<F> {
     /// - Symbolic transpilation with `F = MleAst, A = MleOpeningAccumulator`
     ///
     /// Returns `Vec<F::Challenge>` since challenges come from the transcript.
-    pub fn verify_generic<T: Transcript, A: OpeningAccumulator<F>>(
+    pub fn verify<T: Transcript, A: OpeningAccumulator<F>>(
         &self,
         transcript: &mut T,
         accumulator: &mut A,

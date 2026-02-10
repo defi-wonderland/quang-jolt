@@ -1147,7 +1147,10 @@ where
             let _span =
                 tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
             self.transcript.append_scalars(&claims);
-            self.transcript.challenge_scalar_powers(claims.len())
+            self.transcript.debug_state("after_append_claims");
+            let powers = self.transcript.challenge_scalar_powers(claims.len());
+            self.transcript.debug_state("after_gamma_powers");
+            powers
         };
 
         // Build state for computing joint commitment/claim
@@ -1246,7 +1249,9 @@ where
             &joint_commitment,
             stage8_hint,
         )
-        .context("Stage 8 (hint)")
+        .context("Stage 8 (hint)")?;
+        self.transcript.debug_state("after_dory_replay");
+        Ok(())
     }
 
     /// Compute joint commitment for the batch opening.
@@ -1391,6 +1396,7 @@ where
         // Sample the same challenges from the main transcript that the prover did
         let _gamma: Fq = self.transcript.challenge_scalar();
         let _delta: Fq = self.transcript.challenge_scalar();
+        self.transcript.debug_state("after_gamma_delta");
 
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
 
@@ -1406,7 +1412,9 @@ where
         // Add dense commitment to transcript (must match prover's order)
         self.transcript
             .append_serializable(&recursion_proof.dense_commitment);
+        self.transcript.debug_state("after_dense_commitment");
 
+        self.transcript.debug_state("before_recursion_sumchecks");
         let verification_result = {
             let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);

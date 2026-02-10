@@ -183,21 +183,7 @@ impl<F: JoltField + Allocative> ConstraintListProverSpec<F, 3> for GtMulProverSp
 // ============================================================================
 
 use ark_bn254::Fq;
-use ark_ff::PrimeField;
-
-/// Convert an Fq element to a generic field F.
-/// Used to embed curve-specific constants (g MLE values) into symbolic execution.
-fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
-    let bytes = fq.into_bigint().0;
-    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
-    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
-    if high == 0 {
-        F::from_u128(low)
-    } else {
-        // For large values, use the low bits (sufficient for most constants)
-        F::from_u128(low)
-    }
-}
+use super::super::convert_fq_to_field;
 
 /// Verifier-side specification for GT mul constraints.
 /// Generic over F to support both concrete (Fq) and symbolic (MleAst) execution.

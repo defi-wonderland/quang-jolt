@@ -209,22 +209,7 @@ impl<F: JoltField> G1ScalarMulValues<F> {
     }
 }
 
-/// Convert an Fq element to a generic field F.
-/// Used to embed curve-specific constants (base points) into symbolic execution.
-fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
-    use ark_ff::PrimeField;
-    let bytes = fq.into_bigint().0;
-    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
-    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
-    if high == 0 {
-        F::from_u128(low)
-    } else {
-        // For large values, we need full 256-bit conversion
-        // For symbolic execution, this becomes a constant node
-        // Use the low bits - actual large values would need more sophisticated handling
-        F::from_u128(low)
-    }
-}
+use super::super::convert_fq_to_field;
 
 // =============================================================================
 // Prover Spec

@@ -115,14 +115,14 @@ impl PackedGtExpPublicInputs {
     /// Evaluate the base MLE at challenge point r_x* (4-variable MLE, 16 points).
     /// Generic over F to support symbolic execution.
     pub fn evaluate_base_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
-        self.evaluate_fq12_mle_generic(&self.base, r_x_star)
+        self.evaluate_fq12_mle(&self.base, r_x_star)
     }
 
     /// Evaluate base^2 MLE at challenge point r_x* (4-variable MLE, 16 points).
     /// Generic over F to support symbolic execution.
     pub fn evaluate_base2_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
         let base2 = self.base * self.base;
-        self.evaluate_fq12_mle_generic(&base2, r_x_star)
+        self.evaluate_fq12_mle(&base2, r_x_star)
     }
 
     /// Evaluate base^3 MLE at challenge point r_x* (4-variable MLE, 16 points).
@@ -130,12 +130,12 @@ impl PackedGtExpPublicInputs {
     pub fn evaluate_base3_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
         let base2 = self.base * self.base;
         let base3 = base2 * self.base;
-        self.evaluate_fq12_mle_generic(&base3, r_x_star)
+        self.evaluate_fq12_mle(&base3, r_x_star)
     }
 
     /// Generic helper to evaluate an Fq12 element's MLE at a challenge point.
     /// Converts Fq values to the generic field F for symbolic execution support.
-    fn evaluate_fq12_mle_generic<F: JoltField>(&self, fq12: &Fq12, r_x_star: &[F]) -> F {
+    fn evaluate_fq12_mle<F: JoltField>(&self, fq12: &Fq12, r_x_star: &[F]) -> F {
         debug_assert_eq!(r_x_star.len(), NUM_ELEMENT_VARS);
 
         // Expand GT element to base-field MLE evaluations (16 Fq values)
@@ -1009,29 +1009,7 @@ impl<F: JoltField> PackedGtExpVerifier<F> {
     }
 }
 
-/// Convert an Fq element to a generic field F.
-/// Used to embed curve-specific constants into symbolic execution.
-fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
-    // Convert Fq to its 256-bit representation and then to F
-    use ark_ff::PrimeField;
-    let bytes = fq.into_bigint().0;
-    // Use from_u128 for the lower 128 bits, then handle high bits
-    // For small constants this should be sufficient; for large Fq values
-    // we'd need to handle the full 256-bit conversion
-    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
-    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
-    if high == 0 {
-        F::from_u128(low)
-    } else {
-        // For large values, convert via string representation
-        // This is less efficient but correct
-        let bigint_str = format!("{}", fq.into_bigint());
-        // Parse the BigInt string - this is a workaround for full 256-bit support
-        // In practice, g_mle values might fit in 128 bits
-        // For symbolic execution, this becomes a constant node anyway
-        F::from_u128(low) // Simplified - may need full 256-bit handling for correctness
-    }
-}
+use super::super::convert_fq_to_field;
 
 impl<F: JoltField, T: Transcript, A: OpeningAccumulator<F>> SumcheckInstanceVerifier<F, T, A>
     for PackedGtExpVerifier<F>
