@@ -96,6 +96,12 @@ impl VarCountJaggedBijection {
             self.cumulative_sizes[idx - 1]
         }
     }
+
+    /// Get the total dense size directly (without trait method).
+    /// This is useful when you only need the size and don't have a generic field parameter.
+    pub fn dense_size_value(&self) -> usize {
+        self.total_size
+    }
 }
 
 impl<F: JoltField> JaggedTransform<F> for VarCountJaggedBijection {

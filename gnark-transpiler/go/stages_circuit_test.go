@@ -513,15 +513,20 @@ func TestAssertionCountMatchesTheory(t *testing.T) {
 	t.Log("=== SANITY CHECK: Assertion Count vs Theory ===")
 	t.Log("")
 
-	// According to theory (from gnark-stage5-context.md):
-	// Stage 1: 1 batched sumcheck (Spartan outer)
-	// Stage 2: 5 batched sumchecks (product virtualization, RAM RAF, output check, etc.)
-	// Stage 3: 3 batched sumchecks (shift, instruction input, register claim reduction)
-	// Stage 4: 4 batched sumchecks (register r/w, RAM booleanity, RAM val eval, RAM val final)
-	// Stage 5: 4 batched sumchecks (register val eval, RAM Hamming, RAM ra reduction, lookups read-raf)
+	// Main Jolt Stages 1-7: 17 assertions
+	// Recursion Stages 1-5: 5 assertions
+	// Total: 22 assertions
 	//
-	// However, batched sumchecks produce COMBINED assertions, not one per sumcheck.
-	// The transpiler output shows 13 assertions for Stages 1-5.
+	// Main Jolt (Layer 1 - Fr field):
+	// - Stage 1: Spartan outer sumcheck
+	// - Stages 2-7: Various sumchecks (product, RAM, registers, lookups, etc.)
+	//
+	// Recursion SNARK (Layer 2 - Fq field):
+	// - Stage 1: Packed GT exp sumcheck
+	// - Stage 2: Batched constraint sumchecks (G1/G2 scalar mul, GT mul, etc.)
+	// - Stage 3: Virtualization direct evaluation
+	// - Stage 4: Jagged transform sumcheck
+	// - Stage 5: Jagged assist sumcheck
 
 	// Read the generated circuit to count assertions
 	circuitPath := filepath.Join(filepath.Dir(getStagesWitnessPath()), "stages_circuit.go")
@@ -543,8 +548,8 @@ func TestAssertionCountMatchesTheory(t *testing.T) {
 
 	t.Logf("Assertions found in circuit: %d", assertCount)
 
-	// Check against expected (13 for Stages 1-5)
-	expectedAssertions := 13
+	// Check against expected (22 for Stages 1-7 + Recursion 1-5)
+	expectedAssertions := 22
 	if assertCount != expectedAssertions {
 		t.Logf("WARNING: Expected %d assertions, found %d", expectedAssertions, assertCount)
 	} else {

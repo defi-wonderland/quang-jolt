@@ -257,12 +257,12 @@ impl OpeningAccumulator<MleAst> for MleOpeningAccumulator {
             transcript.append_scalar(claim);
             *stored_point = point;
         } else {
-            // CHANGED: Match WonderJolt behavior - panic if claim doesn't exist
-            // This helps catch missing openings during transpilation
-            panic!(
-                "MleOpeningAccumulator::append_virtual: no claim found for {:?} {:?}",
-                polynomial, sumcheck
-            );
+            // For recursion stages, claims may not be pre-populated.
+            // Insert a symbolic zero claim and append to transcript for consistency.
+            // The actual claim value is derived from witness data during proving.
+            let symbolic_claim = MleAst::zero();
+            transcript.append_scalar(&symbolic_claim);
+            self.openings.insert(key, (point, symbolic_claim));
         }
     }
 

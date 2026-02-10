@@ -12,8 +12,10 @@
 //! If you need to add new witness fields, modify `WitnessFieldIterator::new()` and both
 //! functions will automatically stay in sync.
 //!
-//! NOTE: This is adapted for the quangvdao fork. We only symbolize the core verification
-//! stages (1-7), not the recursion stages (9-13) which run on Grumpkin.
+//! NOTE: This is adapted for the quangvdao fork.
+//! - Stages 1-7: Main Jolt sumchecks (Fr - BN254 scalar field)
+//! - Stages 9-13: Recursion sumchecks (Fq - BN254 base field)
+//! - Stage 8: Dory PCS opening (handled natively in gnark, not transpiled)
 
 use crate::MleOpeningAccumulator;
 use crate::PoseidonAstTranscript;
@@ -42,6 +44,7 @@ use zklean_extractor::AstCommitment;
 /// Identifies which proof stage a witness field belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    // Main Jolt proof stages (1-7) - uses Fr (BN254 scalar field)
     Stage1,
     Stage2,
     Stage3,
@@ -50,6 +53,18 @@ pub enum Stage {
     Stage6a,
     Stage6b,
     Stage7,
+    // Recursion proof stages (9-13) - uses Fq (BN254 base field)
+    // Stage 8 is Dory PCS opening (handled natively in gnark)
+    // Stage 9: Packed GT exp sumcheck
+    RecursionStage1,
+    // Stage 10: Batched constraint sumchecks
+    RecursionStage2,
+    // Stage 11: Virtualization direct evaluation (single value, not sumcheck)
+    RecursionStage3,
+    // Stage 12: Jagged transform sumcheck
+    RecursionStage4,
+    // Stage 13: Jagged assist sumcheck
+    RecursionStage5,
 }
 
 impl Stage {
@@ -63,7 +78,24 @@ impl Stage {
             Stage::Stage6a => "Stage6a",
             Stage::Stage6b => "Stage6b",
             Stage::Stage7 => "Stage7",
+            Stage::RecursionStage1 => "RecursionStage1",
+            Stage::RecursionStage2 => "RecursionStage2",
+            Stage::RecursionStage3 => "RecursionStage3",
+            Stage::RecursionStage4 => "RecursionStage4",
+            Stage::RecursionStage5 => "RecursionStage5",
         }
+    }
+
+    /// Returns true if this stage uses Fq (BN254 base field) instead of Fr
+    pub fn is_recursion_stage(&self) -> bool {
+        matches!(
+            self,
+            Stage::RecursionStage1
+                | Stage::RecursionStage2
+                | Stage::RecursionStage3
+                | Stage::RecursionStage4
+                | Stage::RecursionStage5
+        )
     }
 }
 
@@ -94,6 +126,19 @@ pub enum WitnessField {
         round_idx: usize,
         coeff_idx: usize,
     },
+    // =========================================================================
+    // Recursion proof fields (Fq - BN254 base field)
+    // =========================================================================
+    /// Direct evaluation M(r_s, r_x) from Stage 3 of recursion (single Fq value)
+    RecursionStage3MEval,
+    /// Claimed evaluation in JaggedAssistProof (Stage 5 of recursion)
+    RecursionJaggedAssistClaim {
+        claim_idx: usize,
+    },
+    /// Gamma batching coefficient from RecursionProof
+    RecursionGamma,
+    /// Delta batching coefficient from RecursionProof
+    RecursionDelta,
 }
 
 impl WitnessField {
@@ -112,6 +157,15 @@ impl WitnessField {
             WitnessField::SumcheckCoeff { stage, round_idx, coeff_idx } => {
                 format!("{}_Sumcheck_R{}_{}", stage.name(), round_idx, coeff_idx)
             }
+            // Recursion proof fields
+            WitnessField::RecursionStage3MEval => {
+                "RecursionStage3_M_Eval".to_string()
+            }
+            WitnessField::RecursionJaggedAssistClaim { claim_idx } => {
+                format!("RecursionStage5_JaggedAssist_Claim_{}", claim_idx)
+            }
+            WitnessField::RecursionGamma => "Recursion_Gamma".to_string(),
+            WitnessField::RecursionDelta => "Recursion_Delta".to_string(),
         }
     }
 }
@@ -209,6 +263,79 @@ impl WitnessFieldIterator {
         Self { fields }
     }
 
+    /// Build the witness field list including recursion proof fields.
+    ///
+    /// This extends `new` to also include the recursion stages (9-13).
+    /// The recursion proof uses Fq (BN254 base field) instead of Fr.
+    ///
+    /// # Arguments
+    /// * `proof` - The main Jolt proof (stages 1-7)
+    pub fn new_with_recursion(proof: &RV64IMACProof) -> Self {
+        let mut this = Self::new(proof);
+
+        // Add recursion proof fields (Fq - BN254 base field)
+        let recursion_proof = &proof.recursion_proof;
+
+        // Helper function to add sumcheck fields from Fq polys
+        fn add_fq_sumcheck_fields(
+            fields: &mut Vec<WitnessField>,
+            stage: Stage,
+            polys: &[CompressedUniPoly<Fq>],
+        ) {
+            for (round_idx, poly) in polys.iter().enumerate() {
+                for coeff_idx in 0..poly.coeffs_except_linear_term.len() {
+                    fields.push(WitnessField::SumcheckCoeff {
+                        stage,
+                        round_idx,
+                        coeff_idx,
+                    });
+                }
+            }
+        }
+
+        // Recursion Stage 1: Packed GT exp sumcheck (Fq)
+        add_fq_sumcheck_fields(
+            &mut this.fields,
+            Stage::RecursionStage1,
+            &recursion_proof.stage1_proof.compressed_polys,
+        );
+
+        // Recursion Stage 2: Batched constraint sumchecks (Fq)
+        add_fq_sumcheck_fields(
+            &mut this.fields,
+            Stage::RecursionStage2,
+            &recursion_proof.stage2_proof.compressed_polys,
+        );
+
+        // Recursion Stage 3: Direct evaluation M(r_s, r_x) - single value
+        this.fields.push(WitnessField::RecursionStage3MEval);
+
+        // Recursion Stage 4: Jagged transform sumcheck (Fq)
+        add_fq_sumcheck_fields(
+            &mut this.fields,
+            Stage::RecursionStage4,
+            &recursion_proof.stage4_proof.compressed_polys,
+        );
+
+        // Recursion Stage 5: Jagged assist sumcheck (Fq)
+        // First add claimed evaluations
+        for claim_idx in 0..recursion_proof.stage5_proof.claimed_evaluations.len() {
+            this.fields.push(WitnessField::RecursionJaggedAssistClaim { claim_idx });
+        }
+        // Then add the sumcheck coefficients
+        add_fq_sumcheck_fields(
+            &mut this.fields,
+            Stage::RecursionStage5,
+            &recursion_proof.stage5_proof.sumcheck_proof.compressed_polys,
+        );
+
+        // Add gamma and delta batching coefficients
+        this.fields.push(WitnessField::RecursionGamma);
+        this.fields.push(WitnessField::RecursionDelta);
+
+        this
+    }
+
     /// Total number of witness fields
     pub fn len(&self) -> usize {
         self.fields.len()
@@ -251,6 +378,16 @@ impl VarAllocator {
     pub fn new() -> Self {
         Self {
             next_idx: 0,
+            descriptions: Vec::new(),
+        }
+    }
+
+    /// Create a new allocator that starts from a given offset.
+    /// This is used when allocating variables for a second pass (e.g., recursion stages)
+    /// that need to have distinct indices from the first pass (e.g., stages 1-7).
+    pub fn with_offset(offset: u16) -> Self {
+        Self {
+            next_idx: offset,
             descriptions: Vec::new(),
         }
     }
@@ -627,6 +764,125 @@ fn symbolize_sumcheck_proof<T: jolt_core::transcripts::Transcript>(
     SumcheckInstanceProof::new(compressed_polys)
 }
 
+/// Symbolize a sumcheck proof with Fq field elements (recursion stages).
+///
+/// Note: MleAst is used for both Fr and Fq fields during symbolic execution.
+/// The modulus difference doesn't matter since MleAst just records operations.
+///
+/// The transcript type T is only needed for the type signature since SumcheckInstanceProof<Fq, T>
+/// is generic over T, but we don't actually use T for anything - we just read coefficients.
+fn symbolize_sumcheck_proof_fq<T: jolt_core::transcripts::Transcript>(
+    real: &SumcheckInstanceProof<Fq, T>,
+    alloc: &mut VarAllocator,
+    prefix: &str,
+) -> SumcheckInstanceProof<MleAst, PoseidonAstTranscript> {
+    let compressed_polys: Vec<CompressedUniPoly<MleAst>> = real
+        .compressed_polys
+        .iter()
+        .enumerate()
+        .map(|(round, poly)| {
+            let coeffs = alloc.alloc_n(
+                poly.coeffs_except_linear_term.len(),
+                &format!("{}_r{}", prefix, round),
+            );
+            CompressedUniPoly {
+                coeffs_except_linear_term: coeffs,
+            }
+        })
+        .collect();
+
+    SumcheckInstanceProof::new(compressed_polys)
+}
+
+/// Symbolize the recursion proof (stages 9-13).
+///
+/// This creates symbolic versions of the recursion proof fields,
+/// converting Fq elements to MleAst variables.
+///
+/// # Arguments
+/// * `real_proof` - The full JoltProof containing the recursion proof
+/// * `alloc` - Variable allocator for tracking variable indices
+///
+/// # Returns
+/// A tuple of:
+/// - Symbolic RecursionProof with MleAst variables
+/// - The updated VarAllocator
+/// Symbolize the recursion proof (stages 9-13).
+///
+/// This creates symbolic versions of the recursion proof fields,
+/// converting Fq elements to MleAst variables.
+///
+/// # Arguments
+/// * `real_proof` - The full JoltProof containing the recursion proof
+/// * `alloc` - Variable allocator for tracking variable indices
+///
+/// # Returns
+/// A symbolic RecursionProof with MleAst variables
+pub fn symbolize_recursion_proof(
+    real_proof: &RV64IMACProof,
+    alloc: &mut VarAllocator,
+) -> RecursionProof<MleAst, PoseidonAstTranscript, crate::AstCommitmentScheme> {
+    let recursion_proof = &real_proof.recursion_proof;
+
+    // Symbolize stage 1 proof (packed GT exp sumcheck)
+    let stage1_proof = symbolize_sumcheck_proof_fq(
+        &recursion_proof.stage1_proof,
+        alloc,
+        "recursion_stage1",
+    );
+
+    // Symbolize stage 2 proof (batched constraint sumchecks)
+    let stage2_proof = symbolize_sumcheck_proof_fq(
+        &recursion_proof.stage2_proof,
+        alloc,
+        "recursion_stage2",
+    );
+
+    // Symbolize stage 3 M evaluation
+    let stage3_m_eval = alloc.alloc("recursion_stage3_m_eval");
+
+    // Symbolize stage 4 proof (jagged transform sumcheck)
+    let stage4_proof = symbolize_sumcheck_proof_fq(
+        &recursion_proof.stage4_proof,
+        alloc,
+        "recursion_stage4",
+    );
+
+    // Symbolize stage 5 proof (jagged assist)
+    let stage5_claimed_evals: Vec<MleAst> = (0..recursion_proof.stage5_proof.claimed_evaluations.len())
+        .map(|i| alloc.alloc(&format!("recursion_stage5_claim_{}", i)))
+        .collect();
+    let stage5_sumcheck = symbolize_sumcheck_proof_fq(
+        &recursion_proof.stage5_proof.sumcheck_proof,
+        alloc,
+        "recursion_stage5",
+    );
+    let stage5_proof = JaggedAssistProof {
+        claimed_evaluations: stage5_claimed_evals,
+        sumcheck_proof: stage5_sumcheck,
+    };
+
+    // Symbolize gamma and delta
+    let gamma = alloc.alloc("recursion_gamma");
+    let delta = alloc.alloc("recursion_delta");
+
+    // Build symbolic recursion proof
+    // Note: opening_proof and dense_commitment are not symbolized - they're verified natively in gnark
+    RecursionProof {
+        stage1_proof,
+        stage2_proof,
+        stage3_m_eval,
+        stage4_proof,
+        stage5_proof,
+        // PCS-specific fields use defaults since they're not transpiled
+        opening_proof: AstProof::default(),
+        gamma,
+        delta,
+        opening_claims: std::collections::BTreeMap::new(),
+        dense_commitment: AstCommitment::default(),
+    }
+}
+
 /// Extract concrete witness values from proof data.
 /// Returns a HashMap<variable_index, value_as_decimal_string>
 ///
@@ -697,21 +953,118 @@ pub fn extract_witness_values(
                 format!("{}", coeffs[coeff_idx].into_bigint())
             }
             WitnessField::SumcheckCoeff { stage, round_idx, coeff_idx } => {
-                let polys = match stage {
-                    Stage::Stage1 => &real_proof.stage1_sumcheck_proof.compressed_polys,
-                    Stage::Stage2 => &real_proof.stage2_sumcheck_proof.compressed_polys,
-                    Stage::Stage3 => &real_proof.stage3_sumcheck_proof.compressed_polys,
-                    Stage::Stage4 => &real_proof.stage4_sumcheck_proof.compressed_polys,
-                    Stage::Stage5 => &real_proof.stage5_sumcheck_proof.compressed_polys,
-                    Stage::Stage6a => &real_proof.stage6a_sumcheck_proof.compressed_polys,
-                    Stage::Stage6b => &real_proof.stage6b_sumcheck_proof.compressed_polys,
-                    Stage::Stage7 => &real_proof.stage7_sumcheck_proof.compressed_polys,
-                };
-                format!("{}", polys[round_idx].coeffs_except_linear_term[coeff_idx].into_bigint())
+                // Handle both Fr (stages 1-7) and Fq (recursion stages) sumchecks
+                if stage.is_recursion_stage() {
+                    // Recursion stages use Fq (BN254 base field)
+                    let recursion_proof = &real_proof.recursion_proof;
+                    let polys: &[CompressedUniPoly<Fq>] = match stage {
+                        Stage::RecursionStage1 => &recursion_proof.stage1_proof.compressed_polys,
+                        Stage::RecursionStage2 => &recursion_proof.stage2_proof.compressed_polys,
+                        Stage::RecursionStage4 => &recursion_proof.stage4_proof.compressed_polys,
+                        Stage::RecursionStage5 => &recursion_proof.stage5_proof.sumcheck_proof.compressed_polys,
+                        // Stage 3 has no sumcheck - it's just M_eval
+                        Stage::RecursionStage3 => panic!("RecursionStage3 has no sumcheck coefficients"),
+                        // Non-recursion stages are handled below
+                        _ => unreachable!("non-recursion stages handled separately"),
+                    };
+                    format!("{}", polys[round_idx].coeffs_except_linear_term[coeff_idx].into_bigint())
+                } else {
+                    // Main Jolt stages use Fr (BN254 scalar field)
+                    let polys: &[CompressedUniPoly<ark_bn254::Fr>] = match stage {
+                        Stage::Stage1 => &real_proof.stage1_sumcheck_proof.compressed_polys,
+                        Stage::Stage2 => &real_proof.stage2_sumcheck_proof.compressed_polys,
+                        Stage::Stage3 => &real_proof.stage3_sumcheck_proof.compressed_polys,
+                        Stage::Stage4 => &real_proof.stage4_sumcheck_proof.compressed_polys,
+                        Stage::Stage5 => &real_proof.stage5_sumcheck_proof.compressed_polys,
+                        Stage::Stage6a => &real_proof.stage6a_sumcheck_proof.compressed_polys,
+                        Stage::Stage6b => &real_proof.stage6b_sumcheck_proof.compressed_polys,
+                        Stage::Stage7 => &real_proof.stage7_sumcheck_proof.compressed_polys,
+                        // Recursion stages are handled above
+                        _ => unreachable!("recursion stages handled separately"),
+                    };
+                    format!("{}", polys[round_idx].coeffs_except_linear_term[coeff_idx].into_bigint())
+                }
+            }
+            // Recursion proof fields (Fq)
+            WitnessField::RecursionStage3MEval => {
+                format!("{}", real_proof.recursion_proof.stage3_m_eval.into_bigint())
+            }
+            WitnessField::RecursionJaggedAssistClaim { claim_idx } => {
+                format!("{}", real_proof.recursion_proof.stage5_proof.claimed_evaluations[claim_idx].into_bigint())
+            }
+            WitnessField::RecursionGamma => {
+                format!("{}", real_proof.recursion_proof.gamma.into_bigint())
+            }
+            WitnessField::RecursionDelta => {
+                format!("{}", real_proof.recursion_proof.delta.into_bigint())
             }
         };
         values.insert(idx, value);
     }
+
+    values
+}
+
+/// Extract recursion witness values from proof data.
+/// Returns a HashMap<variable_index, value_as_decimal_string>
+///
+/// This function extracts values in the exact same order as `symbolize_recursion_proof()`.
+/// Variable indices start at 0 for the recursion allocator (caller should offset if needed).
+pub fn extract_recursion_witness_values(
+    real_proof: &RV64IMACProof,
+) -> std::collections::HashMap<usize, String> {
+    use ark_ff::PrimeField;
+
+    let recursion_proof = &real_proof.recursion_proof;
+    let mut values = std::collections::HashMap::new();
+    let mut idx = 0usize;
+
+    // Stage 1 sumcheck coefficients (in order: round 0 coeffs, round 1 coeffs, ...)
+    for poly in &recursion_proof.stage1_proof.compressed_polys {
+        for coeff in &poly.coeffs_except_linear_term {
+            values.insert(idx, format!("{}", coeff.into_bigint()));
+            idx += 1;
+        }
+    }
+
+    // Stage 2 sumcheck coefficients
+    for poly in &recursion_proof.stage2_proof.compressed_polys {
+        for coeff in &poly.coeffs_except_linear_term {
+            values.insert(idx, format!("{}", coeff.into_bigint()));
+            idx += 1;
+        }
+    }
+
+    // Stage 3 M evaluation
+    values.insert(idx, format!("{}", recursion_proof.stage3_m_eval.into_bigint()));
+    idx += 1;
+
+    // Stage 4 sumcheck coefficients
+    for poly in &recursion_proof.stage4_proof.compressed_polys {
+        for coeff in &poly.coeffs_except_linear_term {
+            values.insert(idx, format!("{}", coeff.into_bigint()));
+            idx += 1;
+        }
+    }
+
+    // Stage 5 claimed evaluations
+    for claim in &recursion_proof.stage5_proof.claimed_evaluations {
+        values.insert(idx, format!("{}", claim.into_bigint()));
+        idx += 1;
+    }
+
+    // Stage 5 sumcheck coefficients
+    for poly in &recursion_proof.stage5_proof.sumcheck_proof.compressed_polys {
+        for coeff in &poly.coeffs_except_linear_term {
+            values.insert(idx, format!("{}", coeff.into_bigint()));
+            idx += 1;
+        }
+    }
+
+    // Gamma and delta
+    values.insert(idx, format!("{}", recursion_proof.gamma.into_bigint()));
+    idx += 1;
+    values.insert(idx, format!("{}", recursion_proof.delta.into_bigint()));
 
     values
 }

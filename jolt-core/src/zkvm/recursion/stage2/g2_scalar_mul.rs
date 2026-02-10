@@ -122,25 +122,26 @@ impl G2ScalarMulParams {
 }
 
 /// Single-point evaluation values for G2 scalar mul polynomials.
+/// Generic over F to support both concrete (Fq) and symbolic (MleAst) execution.
 #[derive(Clone, Copy, Debug)]
-struct G2ScalarMulValues {
-    x_a_c0: Fq,
-    x_a_c1: Fq,
-    y_a_c0: Fq,
-    y_a_c1: Fq,
-    x_t_c0: Fq,
-    x_t_c1: Fq,
-    y_t_c0: Fq,
-    y_t_c1: Fq,
-    x_a_next_c0: Fq,
-    x_a_next_c1: Fq,
-    y_a_next_c0: Fq,
-    y_a_next_c1: Fq,
-    t_indicator: Fq,
-    a_indicator: Fq,
+struct G2ScalarMulValues<F> {
+    x_a_c0: F,
+    x_a_c1: F,
+    y_a_c0: F,
+    y_a_c1: F,
+    x_t_c0: F,
+    x_t_c1: F,
+    y_t_c0: F,
+    y_t_c1: F,
+    x_a_next_c0: F,
+    x_a_next_c1: F,
+    y_a_next_c0: F,
+    y_a_next_c1: F,
+    t_indicator: F,
+    a_indicator: F,
 }
 
-impl G2ScalarMulValues {
+impl G2ScalarMulValues<Fq> {
     #[inline]
     fn from_poly_evals<const D: usize>(poly_evals: &[[Fq; D]], idx: usize) -> Self {
         Self {
@@ -160,9 +161,11 @@ impl G2ScalarMulValues {
             a_indicator: poly_evals[13][idx],
         }
     }
+}
 
+impl<F: JoltField> G2ScalarMulValues<F> {
     #[inline]
-    fn from_claims(claims: &[Fq]) -> Self {
+    fn from_claims(claims: &[F]) -> Self {
         Self {
             x_a_c0: claims[0],
             x_a_c1: claims[1],
@@ -182,6 +185,193 @@ impl G2ScalarMulValues {
     }
 
     /// Evaluate batched constraint: Σ_j δ^j * C_j (13 terms)
+    /// Generic over F to support both concrete and symbolic execution.
+    ///
+    /// Base points (x_p, y_p) are provided as (c0, c1) component pairs.
+    fn eval_constraint_generic(
+        &self,
+        bit: F,
+        x_p_c0: F,
+        x_p_c1: F,
+        y_p_c0: F,
+        y_p_c1: F,
+        delta: F,
+    ) -> F {
+        let one = F::one();
+        let two = F::from_u64(2);
+        let three = F::from_u64(3);
+        let four = F::from_u64(4);
+        let nine = F::from_u64(9);
+        let zero = F::zero();
+
+        // Fq2 arithmetic: (a + bi)(c + di) = (ac - bd) + (ad + bc)i
+        // For Fq2 with i² = -1 (used in BN254 G2)
+
+        // Helper functions for Fq2 arithmetic over generic F
+        // mul_fq2: (a0 + a1*i) * (b0 + b1*i) = (a0*b0 - a1*b1) + (a0*b1 + a1*b0)*i
+        let mul_fq2 = |a0: F, a1: F, b0: F, b1: F| -> (F, F) {
+            let c0 = a0 * b0 - a1 * b1;
+            let c1 = a0 * b1 + a1 * b0;
+            (c0, c1)
+        };
+
+        // add_fq2
+        let add_fq2 = |a0: F, a1: F, b0: F, b1: F| -> (F, F) { (a0 + b0, a1 + b1) };
+
+        // sub_fq2
+        let sub_fq2 = |a0: F, a1: F, b0: F, b1: F| -> (F, F) { (a0 - b0, a1 - b1) };
+
+        // scalar_mul_fq2: k * (a0 + a1*i)
+        let scalar_mul_fq2 = |k: F, a0: F, a1: F| -> (F, F) { (k * a0, k * a1) };
+
+        // y_a_sq = y_a * y_a
+        let (y_a_sq_c0, y_a_sq_c1) =
+            mul_fq2(self.y_a_c0, self.y_a_c1, self.y_a_c0, self.y_a_c1);
+
+        // x_a_sq = x_a * x_a
+        let (x_a_sq_c0, x_a_sq_c1) =
+            mul_fq2(self.x_a_c0, self.x_a_c1, self.x_a_c0, self.x_a_c1);
+
+        // x_a_4 = x_a_sq * x_a_sq
+        let (x_a_4_c0, x_a_4_c1) = mul_fq2(x_a_sq_c0, x_a_sq_c1, x_a_sq_c0, x_a_sq_c1);
+
+        // C1: 4*y_a_sq*(x_t + 2*x_a) - 9*x_a_4
+        // x_t + 2*x_a
+        let (two_x_a_c0, two_x_a_c1) = scalar_mul_fq2(two, self.x_a_c0, self.x_a_c1);
+        let (xt_2xa_c0, xt_2xa_c1) = add_fq2(self.x_t_c0, self.x_t_c1, two_x_a_c0, two_x_a_c1);
+        // 4*y_a_sq
+        let (four_yasq_c0, four_yasq_c1) = scalar_mul_fq2(four, y_a_sq_c0, y_a_sq_c1);
+        // 4*y_a_sq*(x_t + 2*x_a)
+        let (term1_c0, term1_c1) = mul_fq2(four_yasq_c0, four_yasq_c1, xt_2xa_c0, xt_2xa_c1);
+        // 9*x_a_4
+        let (nine_xa4_c0, nine_xa4_c1) = scalar_mul_fq2(nine, x_a_4_c0, x_a_4_c1);
+        // c1 = term1 - 9*x_a_4
+        let (c1_c0, c1_c1) = sub_fq2(term1_c0, term1_c1, nine_xa4_c0, nine_xa4_c1);
+
+        // C2: 3*x_a_sq*(x_t - x_a) + 2*y_a*(y_t + y_a)
+        // x_t - x_a
+        let (xt_xa_c0, xt_xa_c1) = sub_fq2(self.x_t_c0, self.x_t_c1, self.x_a_c0, self.x_a_c1);
+        // 3*x_a_sq
+        let (three_xasq_c0, three_xasq_c1) = scalar_mul_fq2(three, x_a_sq_c0, x_a_sq_c1);
+        // 3*x_a_sq*(x_t - x_a)
+        let (term2a_c0, term2a_c1) = mul_fq2(three_xasq_c0, three_xasq_c1, xt_xa_c0, xt_xa_c1);
+        // y_t + y_a
+        let (yt_ya_c0, yt_ya_c1) = add_fq2(self.y_t_c0, self.y_t_c1, self.y_a_c0, self.y_a_c1);
+        // 2*y_a
+        let (two_ya_c0, two_ya_c1) = scalar_mul_fq2(two, self.y_a_c0, self.y_a_c1);
+        // 2*y_a*(y_t + y_a)
+        let (term2b_c0, term2b_c1) = mul_fq2(two_ya_c0, two_ya_c1, yt_ya_c0, yt_ya_c1);
+        // c2 = term2a + term2b
+        let (c2_c0, c2_c1) = add_fq2(term2a_c0, term2a_c1, term2b_c0, term2b_c1);
+
+        // For C3/C4: work with Fq2 values
+        // x_diff = x_p - x_t, y_diff = y_p - y_t
+        let (x_diff_c0, x_diff_c1) = sub_fq2(x_p_c0, x_p_c1, self.x_t_c0, self.x_t_c1);
+        let (y_diff_c0, y_diff_c1) = sub_fq2(y_p_c0, y_p_c1, self.y_t_c0, self.y_t_c1);
+
+        // C3: Conditional addition x-coord
+        // c3_skip = (1 - bit) * (x_a_next - x_t)
+        let one_minus_bit = one - bit;
+        let (xanext_xt_c0, xanext_xt_c1) =
+            sub_fq2(self.x_a_next_c0, self.x_a_next_c1, self.x_t_c0, self.x_t_c1);
+        let (c3_skip_c0, c3_skip_c1) = scalar_mul_fq2(one_minus_bit, xanext_xt_c0, xanext_xt_c1);
+
+        // c3_infinity = bit * ind_t * (x_a_next - x_p)
+        let bit_indt = bit * self.t_indicator;
+        let (xanext_xp_c0, xanext_xp_c1) =
+            sub_fq2(self.x_a_next_c0, self.x_a_next_c1, x_p_c0, x_p_c1);
+        let (c3_inf_c0, c3_inf_c1) = scalar_mul_fq2(bit_indt, xanext_xp_c0, xanext_xp_c1);
+
+        // chord_x = (x_a_next + x_t + x_p) * x_diff² - y_diff²
+        let (xsum1_c0, xsum1_c1) =
+            add_fq2(self.x_a_next_c0, self.x_a_next_c1, self.x_t_c0, self.x_t_c1);
+        let (xsum_c0, xsum_c1) = add_fq2(xsum1_c0, xsum1_c1, x_p_c0, x_p_c1);
+        let (xdiff_sq_c0, xdiff_sq_c1) = mul_fq2(x_diff_c0, x_diff_c1, x_diff_c0, x_diff_c1);
+        let (ydiff_sq_c0, ydiff_sq_c1) = mul_fq2(y_diff_c0, y_diff_c1, y_diff_c0, y_diff_c1);
+        let (chord_x_part1_c0, chord_x_part1_c1) =
+            mul_fq2(xsum_c0, xsum_c1, xdiff_sq_c0, xdiff_sq_c1);
+        let (chord_x_c0, chord_x_c1) =
+            sub_fq2(chord_x_part1_c0, chord_x_part1_c1, ydiff_sq_c0, ydiff_sq_c1);
+
+        // c3_add = bit * (1 - ind_t) * chord_x
+        let bit_one_minus_indt = bit * (one - self.t_indicator);
+        let (c3_add_c0, c3_add_c1) = scalar_mul_fq2(bit_one_minus_indt, chord_x_c0, chord_x_c1);
+
+        // c3 = c3_skip + c3_inf + c3_add
+        let (c3_tmp_c0, c3_tmp_c1) = add_fq2(c3_skip_c0, c3_skip_c1, c3_inf_c0, c3_inf_c1);
+        let (c3_c0, c3_c1) = add_fq2(c3_tmp_c0, c3_tmp_c1, c3_add_c0, c3_add_c1);
+
+        // C4: Conditional addition y-coord
+        // c4_skip = (1 - bit) * (y_a_next - y_t)
+        let (yanext_yt_c0, yanext_yt_c1) =
+            sub_fq2(self.y_a_next_c0, self.y_a_next_c1, self.y_t_c0, self.y_t_c1);
+        let (c4_skip_c0, c4_skip_c1) = scalar_mul_fq2(one_minus_bit, yanext_yt_c0, yanext_yt_c1);
+
+        // c4_infinity = bit * ind_t * (y_a_next - y_p)
+        let (yanext_yp_c0, yanext_yp_c1) =
+            sub_fq2(self.y_a_next_c0, self.y_a_next_c1, y_p_c0, y_p_c1);
+        let (c4_inf_c0, c4_inf_c1) = scalar_mul_fq2(bit_indt, yanext_yp_c0, yanext_yp_c1);
+
+        // chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next)
+        let (yanext_yt_sum_c0, yanext_yt_sum_c1) =
+            add_fq2(self.y_a_next_c0, self.y_a_next_c1, self.y_t_c0, self.y_t_c1);
+        let (chord_y_part1_c0, chord_y_part1_c1) =
+            mul_fq2(yanext_yt_sum_c0, yanext_yt_sum_c1, x_diff_c0, x_diff_c1);
+        let (xt_xanext_c0, xt_xanext_c1) =
+            sub_fq2(self.x_t_c0, self.x_t_c1, self.x_a_next_c0, self.x_a_next_c1);
+        let (chord_y_part2_c0, chord_y_part2_c1) =
+            mul_fq2(y_diff_c0, y_diff_c1, xt_xanext_c0, xt_xanext_c1);
+        let (chord_y_c0, chord_y_c1) =
+            sub_fq2(chord_y_part1_c0, chord_y_part1_c1, chord_y_part2_c0, chord_y_part2_c1);
+
+        // c4_add = bit * (1 - ind_t) * chord_y
+        let (c4_add_c0, c4_add_c1) = scalar_mul_fq2(bit_one_minus_indt, chord_y_c0, chord_y_c1);
+
+        // c4 = c4_skip + c4_inf + c4_add
+        let (c4_tmp_c0, c4_tmp_c1) = add_fq2(c4_skip_c0, c4_skip_c1, c4_inf_c0, c4_inf_c1);
+        let (c4_c0, c4_c1) = add_fq2(c4_tmp_c0, c4_tmp_c1, c4_add_c0, c4_add_c1);
+
+        // C5: ind_A * (1 - ind_T) -- single Fq constraint
+        let c5 = self.a_indicator * (one - self.t_indicator);
+
+        // C6: ind_T * x_T (c0,c1), ind_T * y_T (c0,c1)
+        let c6_xt_c0 = self.t_indicator * self.x_t_c0;
+        let c6_xt_c1 = self.t_indicator * self.x_t_c1;
+        let c6_yt_c0 = self.t_indicator * self.y_t_c0;
+        let c6_yt_c1 = self.t_indicator * self.y_t_c1;
+
+        // Batch with powers of delta (13 terms)
+        let d2 = delta * delta;
+        let d3 = d2 * delta;
+        let d4 = d3 * delta;
+        let d5 = d4 * delta;
+        let d6 = d5 * delta;
+        let d7 = d6 * delta;
+        let d8 = d7 * delta;
+        let d9 = d8 * delta;
+        let d10 = d9 * delta;
+        let d11 = d10 * delta;
+        let d12 = d11 * delta;
+
+        c1_c0
+            + delta * c1_c1
+            + d2 * c2_c0
+            + d3 * c2_c1
+            + d4 * c3_c0
+            + d5 * c3_c1
+            + d6 * c4_c0
+            + d7 * c4_c1
+            + d8 * c5
+            + d9 * c6_xt_c0
+            + d10 * c6_xt_c1
+            + d11 * c6_yt_c0
+            + d12 * c6_yt_c1
+    }
+}
+
+// Concrete Fq implementation using native Fq2 arithmetic
+impl G2ScalarMulValues<Fq> {
+    /// Evaluate batched constraint using native Fq2 arithmetic (for prover)
     fn eval_constraint(&self, bit: Fq, x_p: Fq2, y_p: Fq2, delta: Fq) -> Fq {
         // Reconstruct Fq2 values
         let x_a = Fq2::new(self.x_a_c0, self.x_a_c1);
@@ -260,6 +450,21 @@ impl G2ScalarMulValues {
             + d10 * c6_xt_c1
             + d11 * c6_yt_c0
             + d12 * c6_yt_c1
+    }
+}
+
+/// Convert an Fq element to a generic field F.
+/// Used to embed curve-specific constants (base points) into symbolic execution.
+fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
+    use ark_ff::PrimeField;
+    let bytes = fq.into_bigint().0;
+    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
+    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
+    if high == 0 {
+        F::from_u128(low)
+    } else {
+        // For large values, use the low bits
+        F::from_u128(low)
     }
 }
 
@@ -470,24 +675,29 @@ impl ConstraintListSpec for G2ScalarMulVerifierSpec {
     }
 }
 
-impl ConstraintListVerifierSpec<Fq, DEGREE> for G2ScalarMulVerifierSpec {
-    fn compute_shared_scalars(&self, _eval_point: &[Fq]) -> Vec<Fq> {
+impl<F: JoltField> ConstraintListVerifierSpec<F, DEGREE> for G2ScalarMulVerifierSpec {
+    fn compute_shared_scalars(&self, _eval_point: &[F]) -> Vec<F> {
         vec![]
     }
 
     fn eval_constraint_at_point(
         &self,
         instance: usize,
-        opened_claims: &[Fq],
-        _shared_scalars: &[Fq],
-        eval_point: &[Fq],
-        term_batch_coeff: Option<Fq>,
-    ) -> Fq {
+        opened_claims: &[F],
+        _shared_scalars: &[F],
+        eval_point: &[F],
+        term_batch_coeff: Option<F>,
+    ) -> F {
         let vals = G2ScalarMulValues::from_claims(opened_claims);
         let bit = self.public_inputs[instance].evaluate_bit_mle(eval_point);
-        let (x_p, y_p) = self.base_points[instance];
+        let (x_p_fq2, y_p_fq2) = self.base_points[instance];
+        // Convert Fq2 base point components to generic F
+        let x_p_c0: F = convert_fq_to_field(x_p_fq2.c0);
+        let x_p_c1: F = convert_fq_to_field(x_p_fq2.c1);
+        let y_p_c0: F = convert_fq_to_field(y_p_fq2.c0);
+        let y_p_c1: F = convert_fq_to_field(y_p_fq2.c1);
         let delta = term_batch_coeff.expect("requires term_batch_coeff");
-        vals.eval_constraint(bit, x_p, y_p, delta)
+        vals.eval_constraint_generic(bit, x_p_c0, x_p_c1, y_p_c0, y_p_c1, delta)
     }
 }
 

@@ -221,18 +221,58 @@ impl DirectEvaluationProver {
 }
 
 /// Verifier for the direct evaluation protocol
-pub struct DirectEvaluationVerifier {
+///
+/// Generic over `F: JoltField` to support both real verification (with Fq) and
+/// symbolic transpilation (with MleAst).
+///
+/// Note: `r_x` is stored as `Vec<F::Challenge>` since it comes from earlier sumcheck challenges.
+pub struct DirectEvaluationVerifier<F: JoltField> {
     /// Protocol parameters
     pub params: DirectEvaluationParams,
     /// Virtual claims from Stage 2
-    pub virtual_claims: Vec<Fq>,
-    /// The r_x point from Stage 2
-    pub r_x: Vec<Fq>,
+    pub virtual_claims: Vec<F>,
+    /// The r_x point from Stage 2 (as challenges)
+    pub r_x: Vec<F::Challenge>,
 }
 
-impl DirectEvaluationVerifier {
-    /// Create a new verifier
+impl DirectEvaluationVerifier<Fq> {
+    /// Create a new verifier for real verification (Fq)
+    ///
+    /// Note: `r_x` should be the challenges from Stage 2, converted to field elements
+    /// and back. This method accepts `Vec<Fq>` for backward compatibility.
     pub fn new(params: DirectEvaluationParams, virtual_claims: Vec<Fq>, r_x: Vec<Fq>) -> Self {
+        // Convert r_x from Fq to Fq::Challenge
+        // For Fq, Challenge = Mont254BitChallenge<Fq>
+        let r_x_challenges: Vec<<Fq as JoltField>::Challenge> = r_x.iter().map(|f| (*f).into()).collect();
+        Self {
+            params,
+            virtual_claims,
+            r_x: r_x_challenges,
+        }
+    }
+
+    /// Run the verifier protocol (non-generic convenience method)
+    pub fn verify<T: Transcript>(
+        &self,
+        transcript: &mut T,
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        m_eval_claimed: Fq,
+    ) -> Result<Vec<Fq>, Stage2Error> {
+        // Convert the result from Vec<Fq::Challenge> to Vec<Fq>
+        let challenges = self.verify_generic(transcript, accumulator, m_eval_claimed)?;
+        Ok(challenges.into_iter().map(|c| c.into()).collect())
+    }
+}
+
+impl<F: JoltField> DirectEvaluationVerifier<F> {
+    /// Create a new verifier (generic)
+    ///
+    /// Takes `r_x` as challenges since that's how they come from sumcheck.
+    pub fn new_generic(
+        params: DirectEvaluationParams,
+        virtual_claims: Vec<F>,
+        r_x: Vec<F::Challenge>,
+    ) -> Self {
         Self {
             params,
             virtual_claims,
@@ -240,23 +280,33 @@ impl DirectEvaluationVerifier {
         }
     }
 
-    /// Run the verifier protocol
-    pub fn verify<T: Transcript>(
+    /// Run the verifier protocol - fully generic over field and accumulator type.
+    ///
+    /// This method is generic over `F: JoltField` and `A: OpeningAccumulator<F>`, enabling:
+    /// - Real verification with `F = Fq, A = VerifierOpeningAccumulator<Fq>`
+    /// - Symbolic transpilation with `F = MleAst, A = MleOpeningAccumulator`
+    ///
+    /// Returns `Vec<F::Challenge>` since challenges come from the transcript.
+    pub fn verify_generic<T: Transcript, A: OpeningAccumulator<F>>(
         &self,
         transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        m_eval_claimed: Fq,
-    ) -> Result<Vec<Fq>, Stage2Error> {
-        // Sample the same r_s as the prover
-        let r_s: Vec<Fq> = (0..self.params.num_s_vars)
-            .map(|_| transcript.challenge_scalar::<Fq>())
+        accumulator: &mut A,
+        m_eval_claimed: F,
+    ) -> Result<Vec<F::Challenge>, Stage2Error> {
+        // Sample the same r_s as the prover using optimized challenges
+        let r_s: Vec<F::Challenge> = (0..self.params.num_s_vars)
+            .map(|_| transcript.challenge_scalar_optimized::<F>())
             .collect();
 
+        // Convert r_s to F for EqPolynomial computation
+        let r_s_f: Vec<F> = r_s.iter().map(|c| (*c).into()).collect();
+
         // Compute the expected value: Σ_i eq(r_s, i) · v_i
-        let eq_evals = EqPolynomial::<Fq>::evals(&r_s);
+        let eq_evals = EqPolynomial::<F>::evals(&r_s_f);
         let m_eval_expected = self.compute_expected_evaluation(&eq_evals);
 
         // Verify the claim
+        // For symbolic execution, this comparison builds an assertion AST node
         if m_eval_claimed != m_eval_expected {
             return Err(Stage2Error::EvaluationMismatch {
                 expected: format!("{m_eval_expected:?}"),
@@ -271,12 +321,11 @@ impl DirectEvaluationVerifier {
         // Note: We reverse r_s and r_x because OpeningPoint expects big-endian ordering
         // while our polynomials use little-endian variable ordering internally.
         // The matrix has variables ordered as [x_vars, s_vars] in little-endian.
-        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(
+        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(
             r_s.iter()
                 .rev()
                 .chain(self.r_x.iter().rev())
                 .cloned()
-                .map(|f| f.into())
                 .collect(),
         );
 
@@ -291,8 +340,8 @@ impl DirectEvaluationVerifier {
     }
 
     /// Compute Σ_i eq(r_s, i) · v_i
-    fn compute_expected_evaluation(&self, eq_evals: &[Fq]) -> Fq {
-        let mut result = Fq::zero();
+    fn compute_expected_evaluation(&self, eq_evals: &[F]) -> F {
+        let mut result = F::zero();
 
         // The virtual claims are laid out as:
         // [constraint_0_poly_0, constraint_1_poly_0, ..., constraint_0_poly_1, ...]

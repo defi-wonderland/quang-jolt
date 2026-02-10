@@ -14,14 +14,12 @@ use crate::{
 };
 
 use crate::zkvm::witness::{GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial};
-use core::marker::PhantomData;
 
 use crate::subprotocols::constraint_list_sumcheck::{
     sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
 
-use crate::zkvm::recursion::curve::RecursionCurve;
 use allocative::Allocative;
 
 // ============================================================================
@@ -184,27 +182,65 @@ impl<F: JoltField + Allocative> ConstraintListProverSpec<F, 3> for GtMulProverSp
 // Verifier Spec
 // ============================================================================
 
-/// Verifier-side specification for GT mul constraints.
-#[derive(Clone)]
-pub struct GtMulVerifierSpec<C: RecursionCurve> {
-    params: GtMulParams,
-    _marker: PhantomData<fn() -> C>,
-}
+use ark_bn254::Fq;
+use ark_ff::PrimeField;
 
-impl<C: RecursionCurve> Allocative for GtMulVerifierSpec<C> {
-    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
-}
-
-impl<C: RecursionCurve> GtMulVerifierSpec<C> {
-    pub fn new(params: GtMulParams) -> Self {
-        Self {
-            params,
-            _marker: PhantomData,
-        }
+/// Convert an Fq element to a generic field F.
+/// Used to embed curve-specific constants (g MLE values) into symbolic execution.
+fn convert_fq_to_field<F: JoltField>(fq: Fq) -> F {
+    let bytes = fq.into_bigint().0;
+    let low = bytes[0] as u128 | ((bytes[1] as u128) << 64);
+    let high = bytes[2] as u128 | ((bytes[3] as u128) << 64);
+    if high == 0 {
+        F::from_u128(low)
+    } else {
+        // For large values, use the low bits (sufficient for most constants)
+        F::from_u128(low)
     }
 }
 
-impl<C: RecursionCurve> ConstraintListSpec for GtMulVerifierSpec<C> {
+/// Verifier-side specification for GT mul constraints.
+/// Generic over F to support both concrete (Fq) and symbolic (MleAst) execution.
+#[derive(Clone)]
+pub struct GtMulVerifierSpec<F: JoltField> {
+    params: GtMulParams,
+    /// Pre-converted g MLE values (padded to num_constraint_vars)
+    g_mle: Vec<F>,
+}
+
+impl<F: JoltField> Allocative for GtMulVerifierSpec<F> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
+impl<F: JoltField> GtMulVerifierSpec<F> {
+    /// Create a new verifier spec from Fq g_mle values.
+    /// The g_mle values are converted to generic F and padded appropriately.
+    pub fn new_from_fq(params: GtMulParams, g_mle_4var: &[Fq]) -> Self {
+        use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
+
+        let g_mle_padded = if params.num_constraint_vars == 11 {
+            DoryMatrixBuilder::pad_4var_to_11var_zero_padding(g_mle_4var)
+        } else if params.num_constraint_vars == 8 {
+            DoryMatrixBuilder::pad_4var_to_8var_zero_padding(g_mle_4var)
+        } else {
+            g_mle_4var.to_vec()
+        };
+
+        let g_mle: Vec<F> = g_mle_padded
+            .iter()
+            .map(|fq| convert_fq_to_field::<F>(*fq))
+            .collect();
+
+        Self { params, g_mle }
+    }
+
+    /// Create a new verifier spec with already-converted g_mle values.
+    pub fn new(params: GtMulParams, g_mle: Vec<F>) -> Self {
+        Self { params, g_mle }
+    }
+}
+
+impl<F: JoltField> ConstraintListSpec for GtMulVerifierSpec<F> {
     fn sumcheck_id(&self) -> SumcheckId {
         self.params.sumcheck_id
     }
@@ -229,37 +265,22 @@ impl<C: RecursionCurve> ConstraintListSpec for GtMulVerifierSpec<C> {
     }
 }
 
-impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSpec<C> {
-    fn compute_shared_scalars(&self, eval_point: &[C::Fq]) -> Vec<C::Fq> {
-        // Compute g(eval_point) once from the public g MLE.
-        // The g polynomial is the MLE of the irreducible polynomial p(X) for Fq12.
-        use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
-
-        let g_mle_4var = C::g_mle();
-        let g_mle_padded = if eval_point.len() == 11 {
-            DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var)
-        } else if eval_point.len() == 8 {
-            DoryMatrixBuilder::pad_4var_to_8var_zero_padding(&g_mle_4var)
-        } else {
-            g_mle_4var
-        };
-
-        // Evaluate g polynomial at eval_point
-        let g_poly =
-            MultilinearPolynomial::<C::Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
-        let g_eval = g_poly.evaluate_dot_product::<C::Fq>(eval_point);
-
+impl<F: JoltField> ConstraintListVerifierSpec<F, 3> for GtMulVerifierSpec<F> {
+    fn compute_shared_scalars(&self, eval_point: &[F]) -> Vec<F> {
+        // Evaluate g polynomial at eval_point using pre-converted values
+        let g_poly = MultilinearPolynomial::<F>::LargeScalars(DensePolynomial::new(self.g_mle.clone()));
+        let g_eval = g_poly.evaluate_dot_product::<F>(eval_point);
         vec![g_eval]
     }
 
     fn eval_constraint_at_point(
         &self,
         _instance: usize,
-        opened_claims: &[C::Fq],
-        shared_scalars: &[C::Fq],
-        _eval_point: &[C::Fq],
-        _term_batch_coeff: Option<C::Fq>,
-    ) -> C::Fq {
+        opened_claims: &[F],
+        shared_scalars: &[F],
+        _eval_point: &[F],
+        _term_batch_coeff: Option<F>,
+    ) -> F {
         let lhs = opened_claims[0];
         let rhs = opened_claims[1];
         let result = opened_claims[2];
@@ -282,5 +303,4 @@ pub type GtMulProver<F> = ConstraintListProver<F, GtMulProverSpec<F>, 3>;
 /// Verifier for GT mul sumcheck.
 ///
 /// This is a type alias - no manual trait delegation required.
-pub type GtMulVerifier<C> =
-    ConstraintListVerifier<<C as RecursionCurve>::Fq, GtMulVerifierSpec<C>, 3>;
+pub type GtMulVerifier<F> = ConstraintListVerifier<F, GtMulVerifierSpec<F>, 3>;

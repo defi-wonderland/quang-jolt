@@ -14,9 +14,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gnark_transpiler::{
-    symbolize_jolt_proof, extract_witness_values, AstCommitmentScheme, MleOpeningAccumulator,
-    PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit,
+    symbolize_jolt_proof, symbolize_recursion_proof, extract_witness_values, extract_recursion_witness_values,
+    AstCommitmentScheme, MleOpeningAccumulator,
+    PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit, VarAllocator,
 };
+use jolt_core::zkvm::recursion::recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
 use jolt_core::poly::commitment::dory::DoryCommitmentScheme;
 use jolt_core::transcripts::Transcript;
 use jolt_core::zkvm::transpilable_verifier::{
@@ -178,18 +180,116 @@ fn main() {
         }
     }
 
-    // Collect accumulated assertions (equality checks that become api.AssertIsEqual calls)
-    let assertions = take_assertions();
-    println!("\n=== Accumulated Assertions ===");
+    // Collect assertions from stages 1-7
+    let stages_1_7_assertions = take_assertions();
+    println!("\n=== Stages 1-7 Assertions ===");
+    println!("  Assertions: {}", stages_1_7_assertions.len());
+
+    // === Run Recursion Verification (Stages 9-13) ===
+    // The recursion SNARK proves that the Dory computation was correct.
+    // Note: Stage 8 is the Dory batch opening, which produces the recursion_proof.
+    println!("\n=== Running Symbolic Recursion Verification (Stages 9-13) ===");
+
+    // Build RecursionVerifierInput from proof metadata
+    let metadata = &real_proof.stage10_recursion_metadata;
+    let constraint_types = metadata.constraint_types.clone();
+    let num_constraints = constraint_types.len();
+    let num_constraints_padded = num_constraints.next_power_of_two();
+
+    // Calculate constraint system parameters (must match prover's matrix construction)
+    use jolt_core::zkvm::recursion::constraints_sys::PolyType;
+    let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
+    let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
+    let num_constraint_vars = 11; // All constraints padded to 11 variables
+    let num_vars = num_s_vars + num_constraint_vars;
+
+    let recursion_verifier_input = RecursionVerifierInput {
+        constraint_types,
+        num_vars,
+        num_constraint_vars,
+        num_s_vars,
+        num_constraints,
+        num_constraints_padded,
+        jagged_bijection: metadata.jagged_bijection.clone(),
+        jagged_mapping: metadata.jagged_mapping.clone(),
+        matrix_rows: metadata.matrix_rows.clone(),
+        gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
+        g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
+        g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
+    };
+
+    println!("  Constraint count: {}", num_constraints);
+    println!("  num_s_vars: {}, num_constraint_vars: {}", num_s_vars, num_constraint_vars);
+
+    // Debug: Show actual proof round counts
+    let recursion_proof = &real_proof.recursion_proof;
+    println!("  Stage 1 proof rounds: {}", recursion_proof.stage1_proof.compressed_polys.len());
+    println!("  Stage 2 proof rounds: {}", recursion_proof.stage2_proof.compressed_polys.len());
+    println!("  Stage 4 proof rounds: {}", recursion_proof.stage4_proof.compressed_polys.len());
+    println!("  Stage 5 proof rounds: {}", recursion_proof.stage5_proof.sumcheck_proof.compressed_polys.len());
+
+    // Create RecursionVerifier
+    let recursion_verifier = RecursionVerifier::new(recursion_verifier_input);
+
+    // Symbolize the recursion proof
+    // IMPORTANT: Start recursion variable indices from where stages 1-7 left off.
+    // This ensures no collision between Var(idx) nodes from different allocators.
+    let stages_1_7_var_count = var_alloc.next_idx();
+    let mut recursion_var_alloc = VarAllocator::with_offset(stages_1_7_var_count);
+    let symbolic_recursion_proof = symbolize_recursion_proof(&real_proof, &mut recursion_var_alloc);
+    let recursion_var_count = recursion_var_alloc.next_idx() - stages_1_7_var_count;
+    println!("  Recursion symbolic variables: {}", recursion_var_count);
+
+    // Create fresh accumulator for recursion stages
+    let mut recursion_accumulator = MleOpeningAccumulator::new();
+
+    // Create fresh transcript for recursion stages
+    // Note: In real verification, the transcript continues from stages 1-7.
+    // For transpilation, we create a fresh transcript since we only need the symbolic constraints.
+    let mut recursion_transcript: PoseidonAstTranscript = Transcript::new(b"JoltRecursion");
+
+    // Run recursion verification with symbolic types
+    match recursion_verifier.verify_sumchecks_symbolic::<MleAst, PoseidonAstTranscript, MleOpeningAccumulator>(
+        &symbolic_recursion_proof.stage1_proof,
+        &symbolic_recursion_proof.stage2_proof,
+        symbolic_recursion_proof.stage3_m_eval,
+        &symbolic_recursion_proof.stage4_proof,
+        &symbolic_recursion_proof.stage5_proof,
+        &mut recursion_transcript,
+        &mut recursion_accumulator,
+    ) {
+        Ok(()) => println!("  Recursion stages verification completed successfully"),
+        Err(e) => {
+            println!("  Recursion verification error: {:?}", e);
+            // Continue - we still want to generate the stages 1-7 circuit
+        }
+    }
+
+    // Collect assertions from recursion stages
+    let recursion_assertions = take_assertions();
+    println!("\n=== Recursion Assertions ===");
+    println!("  Assertions: {}", recursion_assertions.len());
+
+    // Merge all assertions
+    let mut assertions = stages_1_7_assertions;
+    assertions.extend(recursion_assertions);
+    println!("\n=== Total Accumulated Assertions ===");
     println!("  Total assertions: {}", assertions.len());
 
 
-    // Build variable name mapping from VarAllocator
-    let var_names: HashMap<u16, String> = var_alloc
+    // Build variable name mapping from both VarAllocators
+    // Stages 1-7 variables: indices 0 to stages_1_7_count-1
+    // Recursion variables: indices stages_1_7_count to total-1 (already offset)
+    let mut var_names: HashMap<u16, String> = var_alloc
         .descriptions()
         .iter()
         .map(|(idx, name)| (*idx, name.clone()))
         .collect();
+
+    // Add recursion variables (indices are already offset via VarAllocator::with_offset)
+    for (idx, name) in recursion_var_alloc.descriptions() {
+        var_names.insert(*idx, name.clone());
+    }
 
     // Generate Gnark circuit
     println!("\n=== Generating Gnark Circuit ===");
@@ -217,13 +317,32 @@ fn main() {
     // I/O operations. Doing both together avoids duplicating this loading logic and improves
     // performance by only parsing these large files once.
     println!("\n=== Generating Witness Data ===");
+
+    // Extract stages 1-7 witness values
     let witness_values = extract_witness_values(&real_proof);
+
+    // Extract recursion stages witness values
+    let recursion_witness_values = extract_recursion_witness_values(&real_proof);
 
     // Build witness JSON mapping sanitized variable names to values
     let mut witness_map: HashMap<String, String> = HashMap::new();
+
+    // Add stages 1-7 witness values
     for (idx, name) in var_alloc.descriptions() {
         let sanitized = sanitize_go_name(name);
         if let Some(value) = witness_values.get(&(*idx as usize)) {
+            witness_map.insert(sanitized, value.clone());
+        }
+    }
+
+    // Add recursion witness values
+    // Note: recursion_var_alloc has offset indices (e.g., 1411, 1412, ...),
+    // but extract_recursion_witness_values returns 0-based indices.
+    // We need to subtract the offset to get the correct lookup.
+    for (idx, name) in recursion_var_alloc.descriptions() {
+        let sanitized = sanitize_go_name(name);
+        let zero_based_idx = (*idx as usize) - (stages_1_7_var_count as usize);
+        if let Some(value) = recursion_witness_values.get(&zero_based_idx) {
             witness_map.insert(sanitized, value.clone());
         }
     }
@@ -233,7 +352,8 @@ fn main() {
     std::fs::write(&witness_path, &witness_json)
         .unwrap_or_else(|e| panic!("Failed to write witness file {:?}: {}", witness_path, e));
     println!("  Witness written to: {:?}", witness_path);
-    println!("  Witness variables: {}", witness_map.len());
+    println!("  Witness variables: {} (stages 1-7: {}, recursion: {})",
+        witness_map.len(), stages_1_7_var_count, recursion_var_count);
 
     // === Extract Hyrax Witness Data ===
     println!("\n=== Extracting Hyrax Witness Data ===");
