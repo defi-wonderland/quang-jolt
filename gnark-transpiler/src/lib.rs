@@ -50,5 +50,5 @@ pub use codegen::{
 pub use ast_commitment_scheme::AstCommitmentScheme;
 pub use mle_opening_accumulator::MleOpeningAccumulator;
 pub use poseidon::PoseidonAstTranscript;
-pub use symbolic_proof::{symbolize_sumcheck_proofs, symbolize_jolt_proof, extract_sumcheck_witness_values, SymbolicSumcheckProofs, VarAllocator};
+pub use symbolic_proof::{symbolize_sumcheck_proofs, symbolize_jolt_proof, extract_witness_values, SymbolicSumcheckProofs, VarAllocator};
 pub use witness::Stage1Witness;

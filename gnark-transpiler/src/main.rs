@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gnark_transpiler::{
-    symbolize_jolt_proof, extract_sumcheck_witness_values, AstCommitmentScheme, MleOpeningAccumulator,
+    symbolize_jolt_proof, extract_witness_values, AstCommitmentScheme, MleOpeningAccumulator,
     PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit,
 };
 use jolt_core::poly::commitment::dory::DoryCommitmentScheme;
@@ -106,7 +106,7 @@ fn main() {
     println!("  inputs: {} bytes", io_device.inputs.len());
     println!("  outputs: {} bytes", io_device.outputs.len());
 
-    // Load preprocessing (Dory version - matches jolt-sdk)
+    // Load preprocessing (Dory version, matches jolt-sdk)
     // Uses verifier::JoltVerifierPreprocessing which has the serialization format
     println!("\nLoading preprocessing from: {:?}", args.preprocessing);
     let preprocessing_bytes = std::fs::read(&args.preprocessing)
@@ -138,6 +138,7 @@ fn main() {
             },
             ram: ram_preprocessing,
             memory_layout: real_preprocessing.shared.memory_layout.clone(),
+            hyrax_recursion_setup: real_preprocessing.hyrax_recursion_setup.clone(),
         };
 
     // Symbolize the proof (creates full JoltProof with symbolic sumcheck coefficients)
@@ -167,9 +168,9 @@ fn main() {
     // Enable assertion mode so MleAst comparisons register equality checks
     enable_constraint_mode();
 
-    // Run verification - Stages 1-7 (all sumcheck stages, excluding Hyrax opening)
+    // Run verification stages 1-7 (all sumcheck stages, excluding Hyrax opening)
     println!("\n=== Running Symbolic Verification (Stages 1-7) ===");
-    match verifier.verify_stages_1_7() {
+    match verifier.verify() {
         Ok(()) => println!("  Stages 1-7 verification completed successfully"),
         Err(e) => {
             println!("  Verification error: {:?}", e);
@@ -210,6 +211,11 @@ fn main() {
     println!("  Circuit size: {} bytes", circuit_code.len());
 
     // === Generate witness data ===
+    // Note: While it might seem logically cleaner to separate circuit generation from witness
+    // generation (separation of concerns), it is computationally optimal to do both in a single
+    // pass. Both operations require loading the proof and preprocessing files, which are expensive
+    // I/O operations. Doing both together avoids duplicating this loading logic and improves
+    // performance by only parsing these large files once.
     println!("\n=== Generating Witness Data ===");
     let witness_values = extract_witness_values(&real_proof);
 
@@ -253,20 +259,20 @@ fn main() {
 /// Hyrax witness data for Gnark circuit
 #[derive(Serialize)]
 struct HyraxWitness {
-    /// Full sqrt(N) - used for MSM #2 (generators × U) and dot product (U · R)
+    /// Full sqrt(N), used for MSM #2 (generators × U) and dot product (U · R)
     sqrt_n: usize,
     /// Filtered size for MSM #1 (non-identity row commitments × L)
     sqrt_n1: usize,
     /// U vector (prover's projection): vector_matrix_product from opening proof
     /// Size: sqrt_n (full)
     u: Vec<String>,
-    /// Row commitments from dense_commitment - FILTERED to remove identity points
+    /// Row commitments from dense_commitment, FILTERED to remove identity points
     /// Size: sqrt_n1 (filtered)
     row_commitments: Vec<[String; 2]>,
     /// Pedersen generators from preprocessing (Grumpkin affine points as [x, y])
-    /// Size: sqrt_n (full - generators are never identity)
+    /// Size: sqrt_n (full, generators are never identity)
     generators: Vec<[String; 2]>,
-    /// L vector: eq(a, z_L) - FILTERED to match non-identity row commitments
+    /// L vector: eq(a, z_L), FILTERED to match non-identity row commitments
     /// Size: sqrt_n1 (filtered)
     l: Vec<String>,
     /// R vector: eq(b, z_R) for right half of opening point
@@ -278,21 +284,6 @@ struct HyraxWitness {
     opening_point: Vec<String>,
     /// Dense num vars
     dense_num_vars: usize,
-}
-
-/// Convert a Grumpkin affine point to [x, y] string representation
-fn grumpkin_point_to_strings(point: &ark_grumpkin::Affine) -> [String; 2] {
-    use ark_ec::AffineRepr;
-    // Grumpkin points use Fq (BN254 scalar field) for coordinates
-    if point.is_zero() {
-        // Point at infinity - use zeros
-        return ["0".to_string(), "0".to_string()];
-    }
-    let (x, y) = point.xy().unwrap();
-    [
-        x.into_bigint().to_string(),
-        y.into_bigint().to_string(),
-    ]
 }
 
 /// Extract Hyrax witness data from JoltProof and preprocessing
@@ -324,36 +315,32 @@ fn extract_hyrax_witness(
     // This is mathematically correct because L[a] × identity = identity (adds zero to MSM).
     use ark_ec::AffineRepr;
 
-    // First pass: identify which points are non-identity and their original indices
-    let mut non_identity_row_commitments: Vec<[String; 2]> = Vec::new();
-    let mut non_identity_indices: Vec<usize> = Vec::new();
-    let mut identity_count = 0;
+    // Filter out identity points and collect both commitments and their indices
+    let (non_identity_row_commitments, non_identity_indices): (Vec<[String; 2]>, Vec<usize>) =
+        recursion_proof.dense_commitment.row_commitments
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                let affine: ark_grumpkin::Affine = (*p).into();
+                (!affine.is_zero()).then(|| (grumpkin_point_to_strings(&affine), i))
+            })
+            .unzip();
 
-    for (i, p) in recursion_proof.dense_commitment.row_commitments.iter().enumerate() {
-        let affine: ark_grumpkin::Affine = (*p).into();
-        if affine.is_zero() {
-            identity_count += 1;
-        } else {
-            non_identity_row_commitments.push(grumpkin_point_to_strings(&affine));
-            non_identity_indices.push(i);
-        }
-    }
+    let identity_count = recursion_proof.dense_commitment.row_commitments.len()
+        - non_identity_indices.len();
 
     println!("  Identity row commitments (filtered out): {}", identity_count);
     println!("  Non-identity row commitments: {}", non_identity_row_commitments.len());
 
-    // Generators - use from preprocessing instead of regenerating
-    let (_, gen_size) = matrix_dimensions(dense_num_vars, 1);
+    // Calculate matrix dimensions (used for both generators and L/R vectors)
+    let (l_size, r_size) = matrix_dimensions(dense_num_vars, 1);
+    let sqrt_n = l_size; // Both should be equal for square matrix
 
-    // Use generators from preprocessing
-    let generators: Vec<[String; 2]> = preprocessing.hyrax_recursion_setup.generators[..gen_size]
+    // Generators: use from preprocessing instead of regenerating
+    let generators: Vec<[String; 2]> = preprocessing.hyrax_recursion_setup.generators[..r_size]
         .iter()
         .map(|p| grumpkin_point_to_strings(p))
         .collect();
-
-    // Calculate matrix dimensions to get L_size and R_size
-    let (l_size, r_size) = matrix_dimensions(dense_num_vars, 1);
-    let sqrt_n = l_size; // Both should be equal for square matrix
 
     // The opening point for the dense polynomial comes from the recursion proof's opening claims
     // We need to find the point at which the dense polynomial is opened
@@ -385,7 +372,7 @@ fn extract_hyrax_witness(
 
         if let OpeningId::Polynomial(PolynomialId::Committed(CommittedPolynomial::DoryDenseMatrix), _) = key {
             v_value = Some(*value);
-            // The point is stored as challenges - convert to field elements
+            // The point is stored as challenges, convert to field elements
             let point_vec: Vec<Fq> = point.r.iter().map(|c| {
                 let fq: Fq = (*c).into();
                 fq
@@ -482,4 +469,18 @@ fn extract_hyrax_witness(
     }
 }
 
+/// Convert a Grumpkin affine point to [x, y] string representation
+fn grumpkin_point_to_strings(point: &ark_grumpkin::Affine) -> [String; 2] {
+    use ark_ec::AffineRepr;
+    // Grumpkin points use Fq (BN254 scalar field) for coordinates
+    if point.is_zero() {
+        // Point at infinity, use zeros
+        return ["0".to_string(), "0".to_string()];
+    }
+    let (x, y) = point.xy().unwrap();
+    [
+        x.into_bigint().to_string(),
+        y.into_bigint().to_string(),
+    ]
+}
 
