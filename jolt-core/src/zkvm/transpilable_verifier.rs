@@ -7,27 +7,40 @@
 //! The verifier is generic over the accumulator type `A: OpeningAccumulator<F>`, which allows
 //! it to be used for both purposes without code duplication.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use ark_bn254::Fq;
+use ark_grumpkin::Projective as GrumpkinProjective;
+
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
+use crate::poly::commitment::hyrax::{Hyrax, PedersenGenerators};
+use crate::poly::opening_proof::{
+    compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator, OpeningId, OpeningPoint,
+    PolynomialId, SumcheckId, VerifierOpeningAccumulator,
+};
+use crate::zkvm::recursion::recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
+use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::subprotocols::sumcheck::BatchedSumcheck;
+use crate::zkvm::bytecode::chunks::total_lanes;
 use crate::zkvm::bytecode::read_raf_checking::{
     BytecodeReadRafAddressSumcheckVerifier, BytecodeReadRafCycleSumcheckVerifier,
     BytecodeReadRafSumcheckParams,
 };
-use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
-use crate::zkvm::config::{OneHotConfig, OneHotParams, ProgramMode};
+use crate::zkvm::claim_reductions::{
+    hamming_weight::HammingWeightClaimReductionVerifier,
+    increments::IncClaimReductionSumcheckVerifier, AdviceKind,
+    InstructionLookupsClaimReductionSumcheckVerifier, RamRaClaimReductionSumcheckVerifier,
+    RegistersClaimReductionSumcheckVerifier,
+};
+use crate::zkvm::config::{OneHotParams, ProgramMode};
 use crate::zkvm::program::VerifierProgram;
 use crate::zkvm::ram::val_final::ValFinalSumcheckVerifier;
+use crate::zkvm::witness::{all_committed_polynomials, CommittedPolynomial};
 use crate::zkvm::Serializable;
 use crate::zkvm::{
-    claim_reductions::{
-        hamming_weight::HammingWeightClaimReductionVerifier,
-        increments::IncClaimReductionSumcheckVerifier,
-        InstructionLookupsClaimReductionSumcheckVerifier, RamRaClaimReductionSumcheckVerifier,
-    },
     fiat_shamir_preamble,
     instruction_lookups::{
         ra_virtual::RaSumcheckVerifier as LookupsRaSumcheckVerifier,
@@ -57,7 +70,6 @@ use crate::zkvm::{
 };
 use crate::{
     field::JoltField,
-    poly::opening_proof::{OpeningAccumulator, OpeningPoint, VerifierOpeningAccumulator},
     pprof_scope,
     subprotocols::{
         booleanity::{
@@ -72,7 +84,29 @@ use crate::{
 use anyhow::Context;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
+use itertools::Itertools;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use tracer::JoltDevice;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_STAGE8: &str = "jolt_verify_stage8";
+const CYCLE_VERIFY_STAGE8_DORY_PCS: &str = "jolt_verify_stage8_dory_pcs";
+const CYCLE_VERIFY_STAGE8_RECURSION: &str = "jolt_verify_stage8_recursion";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 /// Transpilable verifier that is generic over the opening accumulator type.
 ///
@@ -96,8 +130,16 @@ pub struct TranspilableVerifier<
     pub one_hot_params: OneHotParams,
 }
 
-impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F> + RecursionExt<F>, ProofTranscript: Transcript>
-    TranspilableVerifier<'a, F, PCS, ProofTranscript, VerifierOpeningAccumulator<F>>
+// =============================================================================
+// Constructor for real verification (VerifierOpeningAccumulator)
+// =============================================================================
+
+impl<
+        'a,
+        F: JoltField,
+        PCS: CommitmentScheme<Field = F> + RecursionExt<F>,
+        ProofTranscript: Transcript,
+    > TranspilableVerifier<'a, F, PCS, ProofTranscript, VerifierOpeningAccumulator<F>>
 {
     /// Create a new TranspilableVerifier with concrete VerifierOpeningAccumulator.
     pub fn new(
@@ -165,6 +207,10 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F> + RecursionExt<F>, Proof
     }
 }
 
+// =============================================================================
+// Generic verification methods (work with any OpeningAccumulator)
+// =============================================================================
+
 impl<
         'a,
         F: JoltField,
@@ -201,10 +247,12 @@ impl<
         }
     }
 
-    /// Run verification stages 1-5.
+    /// Verify the Jolt proof (stages 1-7, all sumcheck stages).
     ///
-    /// This verifies all stages that can be transpiled to Gnark.
-    /// Stages 6, 7, and 8 are PCS-specific and are not included here.
+    /// Stage 8 (PCS batch opening) is not called here because it requires
+    /// concrete PCS types (DoryGlobals, commitments map, PCS::verify).
+    /// For Gnark transpilation, Stage 8 is handled natively in Go.
+    /// See `verify_stage8()` in the VerifierOpeningAccumulator impl block.
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
@@ -236,182 +284,10 @@ impl<
         self.verify_stage3()?;
         self.verify_stage4()?;
         self.verify_stage5()?;
-        // Note: Stages 6, 7, 8 use VerifierOpeningAccumulator-specific methods
-        // and are not transpilable to Gnark. They handle PCS (Hyrax/Dory) verification.
-
-        Ok(())
-    }
-
-    /// Run only Stage 1 verification for incremental debugging.
-    ///
-    /// This allows testing the transpiled circuit with just Stage 1
-    /// before adding more stages.
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stage1_only(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stage1_only");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        // Stages 2-5 commented out for incremental debugging
-
-        Ok(())
-    }
-
-    /// Run Stages 1-2 verification for incremental debugging.
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_2(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_2");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-
-        Ok(())
-    }
-
-    /// Run Stages 1-3 verification for incremental debugging.
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_3(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_3");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-
-        Ok(())
-    }
-
-    /// Run Stages 1-4 verification for incremental debugging.
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_4(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_4");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-
-        Ok(())
-    }
-
-    /// Run Stages 1-5 verification (all sumcheck stages, excluding Hyrax opening).
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_5(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_5");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-        self.verify_stage5()?;
+        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
+        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
+        self.verify_stage7()?;
+        // self.verify_stage8_with_recursion()?;  // PCS-specific — handled natively in Go
 
         Ok(())
     }
@@ -614,43 +490,6 @@ impl<
         Ok(())
     }
 
-    /// Run Stages 1-6a verification (sumcheck stages, excluding Hyrax opening).
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_6a(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_6a");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-        self.verify_stage5()?;
-        self.verify_stage6a()?;
-
-        Ok(())
-    }
-
     fn verify_stage6a(
         &mut self,
     ) -> Result<(BytecodeReadRafSumcheckParams<F>, BooleanitySumcheckParams<F>), anyhow::Error> {
@@ -692,50 +531,11 @@ impl<
         Ok((bytecode_read_raf.into_params(), booleanity.into_params()))
     }
 
-    /// Run Stages 1-6b verification (sumcheck stages, excluding Hyrax opening).
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_6b(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_6b");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-        self.verify_stage5()?;
-        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
-        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
-
-        Ok(())
-    }
-
     fn verify_stage6b(
         &mut self,
         bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
         booleanity_params: BooleanitySumcheckParams<F>,
     ) -> Result<(), anyhow::Error> {
-        // Initialize Stage 6b cycle verifiers
         let booleanity = BooleanityCycleSumcheckVerifier::new(booleanity_params);
         let ram_hamming_booleanity =
             HammingBooleanitySumcheckVerifier::new(&self.opening_accumulator);
@@ -758,8 +558,6 @@ impl<
 
         let bytecode_read_raf = BytecodeReadRafCycleSumcheckVerifier::new(bytecode_read_raf_params);
 
-        // Note: In Full mode, we skip BytecodeClaimReduction, AdviceClaimReduction, and
-        // ProgramImageClaimReduction which are only used in Committed mode.
         let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, A>> = vec![
             &bytecode_read_raf,
             &ram_hamming_booleanity,
@@ -780,55 +578,13 @@ impl<
         Ok(())
     }
 
-    /// Run Stages 1-7 verification (all sumcheck stages, excluding Hyrax opening).
-    #[tracing::instrument(skip_all)]
-    pub fn verify_stages_1_7(mut self) -> Result<(), anyhow::Error> {
-        let _pprof_verify = pprof_scope!("verify_stages_1_7");
-
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
-
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
-        }
-
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-        self.verify_stage5()?;
-        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
-        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
-        self.verify_stage7()?;
-
-        Ok(())
-    }
-
     fn verify_stage7(&mut self) -> Result<(), anyhow::Error> {
-        // Create verifier for HammingWeightClaimReduction
         let hw_verifier = HammingWeightClaimReductionVerifier::new(
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
 
-        // Note: In Full mode, we skip BytecodeClaimReduction and AdviceClaimReduction
-        // which are only used in Committed mode.
         let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, A>> =
             vec![&hw_verifier];
 
@@ -843,11 +599,439 @@ impl<
         Ok(())
     }
 
-    // =========================================================================
-    // Stage 8 is NOT transpilable to Gnark (Dory/Hyrax opening verification).
-    // For Gnark transpilation, this would be replaced by native Gnark operations.
-    // =========================================================================
+    /// Stage 8: PCS batch opening verification using a recursion hint (when supported by the PCS).
+    #[allow(dead_code)]
+    #[tracing::instrument(skip_all, name = "verify_stage8_with_pcs_hint")]
+    fn verify_stage8_with_pcs_hint(
+        &mut self,
+        stage8_hint: &<PCS as RecursionExt<F>>::Hint,
+    ) -> Result<(), anyhow::Error>
+    where
+        PCS: RecursionExt<F>,
+    {
+        // Get the unified opening point from HammingWeightClaimReduction
+        // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
+        let (opening_point, polynomial_claims, claims) = {
+            let _span = tracing::info_span!("stage8_collect_claims").entered();
+
+            let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::InstructionRa(0),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            let log_k_chunk = self.one_hot_params.log_k_chunk;
+            let r_address_stage7 = &opening_point.r[..log_k_chunk];
+
+            // 1. Collect all (polynomial, claim) pairs
+            let mut polynomial_claims = Vec::new();
+
+            // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
+            let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            );
+            let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            );
+
+            // Apply Lagrange factor for dense polys
+            // Note: r_address is in big-endian, Lagrange factor uses ∏(1 - r_i)
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+
+            polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+            polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
+
+            // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
+            for i in 0..self.one_hot_params.instruction_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::InstructionRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.bytecode_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::BytecodeRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.ram_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
+            }
+
+            // Advice polynomials (if present): fold into the Stage 8 batch via a Lagrange embedding
+            // so the verifier samples the same gamma powers as the prover.
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::TrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::UntrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
+            // Bytecode chunk polynomials: committed in Bytecode context and embedded into the
+            // main opening point by fixing the extra cycle variables to 0.
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (bytecode_point, _) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(0),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                #[cfg(test)]
+                {
+                    let log_t = opening_point.r.len() - log_k_chunk;
+                    let log_k = bytecode_point.r.len() - log_k_chunk;
+                    if log_k == log_t {
+                        assert_eq!(
+                            bytecode_point.r, opening_point.r,
+                            "BytecodeChunk opening point must equal unified opening point when log_K == log_T"
+                        );
+                    }
+                }
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
+
+                let num_chunks = total_lanes().div_ceil(self.one_hot_params.k_chunk);
+                for i in 0..num_chunks {
+                    let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(i),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                    polynomial_claims.push((
+                        CommittedPolynomial::BytecodeChunk(i),
+                        claim * lagrange_factor,
+                    ));
+                }
+            }
+
+            // Program-image polynomial: opened by ProgramImageClaimReduction in Stage 6b.
+            // Embed into the top-left block of the main matrix (same trick as advice).
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (prog_point, prog_claim) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::ProgramImageInit,
+                        SumcheckId::ProgramImageClaimReduction,
+                    );
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::ProgramImageInit,
+                    prog_claim * lagrange_factor,
+                ));
+            }
+
+            let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
+            (opening_point, polynomial_claims, claims)
+        };
+
+        // 2. Sample gamma and compute powers for RLC
+        let gamma_powers: Vec<F> = {
+            let _span =
+                tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
+            self.transcript.append_scalars(&claims);
+            self.transcript.challenge_scalar_powers(claims.len())
+        };
+
+        // Build state for computing joint commitment/claim
+        let state = DoryOpeningState {
+            opening_point: opening_point.r.clone(),
+            gamma_powers: gamma_powers.clone(),
+            polynomial_claims,
+        };
+
+        // Compute joint commitment: Σ γ_i · C_i
+        // Use precomputed hint if available, otherwise compute directly
+        let joint_commitment = {
+            let _span = tracing::info_span!("stage8_joint_commitment").entered();
+            if let Some(combine_hint) = &self.proof.stage8_combine_hint {
+                // Use the precomputed hint (recursion-offloaded path)
+                PCS::combine_with_hint_fq12(combine_hint)
+            } else {
+                // Build commitments map and compute directly
+                let mut commitments_map = HashMap::new();
+                for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
+                    .into_iter()
+                    .zip_eq(&self.proof.commitments)
+                {
+                    commitments_map.insert(polynomial, commitment.clone());
+                }
+
+                // Add advice commitments if they're part of the batch
+                if let Some(ref commitment) = self.trusted_advice_commitment {
+                    if state
+                        .polynomial_claims
+                        .iter()
+                        .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+                    {
+                        commitments_map
+                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                    }
+                }
+                if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
+                    if state
+                        .polynomial_claims
+                        .iter()
+                        .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+                    {
+                        commitments_map
+                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                    }
+                }
+
+                // Add program commitments in committed mode
+                if self.proof.program_mode == ProgramMode::Committed {
+                    if let Ok(committed) = self.preprocessing.program.as_committed() {
+                        for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+                            commitments_map
+                                .entry(CommittedPolynomial::BytecodeChunk(idx))
+                                .or_insert_with(|| commitment.clone());
+                        }
+
+                        // Add trusted program-image commitment if it's part of the batch
+                        if state
+                            .polynomial_claims
+                            .iter()
+                            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+                        {
+                            commitments_map.insert(
+                                CommittedPolynomial::ProgramImageInit,
+                                committed.program_image_commitment.clone(),
+                            );
+                        }
+                    }
+                }
+
+                self.compute_joint_commitment(&mut commitments_map, &state)
+            }
+        };
+
+        // Compute joint claim: Σ γ_i · claim_i
+        let joint_claim: F = {
+            let _span = tracing::info_span!("stage8_joint_claim").entered();
+            gamma_powers
+                .iter()
+                .zip(claims.iter())
+                .map(|(gamma, claim)| *gamma * claim)
+                .sum()
+        };
+
+        // Verify opening using the hint-based PCS verifier.
+        //
+        // Important: This must remain transcript-compatible with the prover's `PCS::prove`
+        // for end-to-end recursion correctness (gamma/delta are sampled from the same transcript).
+        PCS::verify_with_hint(
+            &self.proof.stage8_opening_proof,
+            &self.preprocessing.generators,
+            &mut self.transcript,
+            &opening_point.r,
+            &joint_claim,
+            &joint_commitment,
+            stage8_hint,
+        )
+        .context("Stage 8 (hint)")
+    }
+
+    /// Compute joint commitment for the batch opening.
+    #[allow(dead_code)]
+    fn compute_joint_commitment(
+        &self,
+        commitment_map: &mut HashMap<CommittedPolynomial, PCS::Commitment>,
+        state: &DoryOpeningState<F>,
+    ) -> PCS::Commitment {
+        // Accumulate gamma coefficients per polynomial
+        let mut rlc_map = HashMap::new();
+        for (gamma, (poly, _claim)) in state
+            .gamma_powers
+            .iter()
+            .zip(state.polynomial_claims.iter())
+        {
+            *rlc_map.entry(*poly).or_insert(F::zero()) += *gamma;
+        }
+
+        let (coeffs, commitments): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
+            .into_iter()
+            .map(|(k, v)| (v, commitment_map.remove(&k).unwrap()))
+            .unzip();
+
+        PCS::combine_commitments(&commitments, &coeffs)
+    }
+
+    /// Verify Stage 8 with recursion proof.
+    ///
+    /// Not called from `verify()` — for Gnark transpilation, Stage 8 is handled
+    /// natively in Go (combined_circuit.go + hyrax_verifier.go).
+    /// Kept here as compilable reference of the full verification pipeline.
+    #[allow(dead_code)]
+    #[tracing::instrument(skip_all, name = "verify_stage8_with_recursion")]
+    fn verify_stage8_with_recursion(&mut self) -> Result<(), anyhow::Error>
+    where
+        PCS: RecursionExt<F>,
+        <PCS as RecursionExt<F>>::Hint: Clone,
+    {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
+        // 1. Verify Dory proof with hints
+        let hint = {
+            let _span = tracing::info_span!("stage8_clone_hint").entered();
+            self.proof.stage9_pcs_hint.clone().ok_or_else(|| {
+                anyhow::anyhow!("stage9_pcs_hint is required for recursion verification")
+            })?
+        };
+
+        {
+            let _span = tracing::info_span!("stage8_verify_dory_with_hint").entered();
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
+            self.verify_stage8_with_pcs_hint(&hint)?;
+        }
+
+        // 2. Extract data for RecursionVerifier
+        let recursion_proof = &self.proof.recursion_proof;
+
+        // Extract constraint counts from the opening claims in recursion_proof
+        let (_num_gt_exp, _num_gt_mul, _num_g1_scalar_mul) = {
+            let _span = tracing::info_span!(
+                "stage8_count_constraint_types",
+                num_claims = recursion_proof.opening_claims.len()
+            )
+            .entered();
+            let mut num_gt_exp = 0;
+            let mut num_gt_mul = 0;
+            let mut num_g1_scalar_mul = 0;
+
+            // Count constraint types based on the virtual polynomial types in opening claims
+            use crate::zkvm::witness::{RecursionPoly, VirtualPolynomial};
+            for key in recursion_proof.opening_claims.keys() {
+                if let OpeningId::Polynomial(
+                    PolynomialId::Virtual(VirtualPolynomial::Recursion(rec_poly)),
+                    _,
+                ) = key
+                {
+                    match rec_poly {
+                        RecursionPoly::GtExp { instance, .. } => {
+                            num_gt_exp = num_gt_exp.max(instance + 1);
+                        }
+                        RecursionPoly::GtMul { instance, .. } => {
+                            num_gt_mul = num_gt_mul.max(instance + 1);
+                        }
+                        RecursionPoly::G1ScalarMul { instance, .. } => {
+                            num_g1_scalar_mul = num_g1_scalar_mul.max(instance + 1);
+                        }
+                        _ => {} // G1Add, G2Add, G2ScalarMul - ignore for now
+                    }
+                }
+            }
+            (num_gt_exp, num_gt_mul, num_g1_scalar_mul)
+        };
+
+        // Use metadata from proof instead of placeholders
+        let metadata = &self.proof.stage10_recursion_metadata;
+
+        let verifier_input = {
+            let _span = tracing::info_span!("stage8_build_verifier_input").entered();
+            let constraint_types = metadata.constraint_types.clone();
+            let num_constraints = constraint_types.len();
+            let num_constraints_padded = num_constraints.next_power_of_two();
+
+            // Calculate the constraint system parameters for the verifier input.
+            //
+            // IMPORTANT: These must match the recursion prover's matrix construction:
+            // - `num_constraint_vars = 11` (uniform matrix compatible with packed GT exp)
+            // - `num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded`
+            use crate::zkvm::recursion::constraints_sys::PolyType;
+            let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
+            let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
+            let num_constraint_vars = 11; // All constraints padded to 11 variables (zero padding)
+            let num_vars = num_s_vars + num_constraint_vars;
+
+            let jagged_bijection = metadata.jagged_bijection.clone();
+            let jagged_mapping = metadata.jagged_mapping.clone();
+            let matrix_rows = metadata.matrix_rows.clone();
+
+            RecursionVerifierInput {
+                constraint_types,
+                num_vars,
+                num_constraint_vars,
+                num_s_vars,
+                num_constraints,
+                num_constraints_padded,
+                jagged_bijection,
+                jagged_mapping,
+                matrix_rows,
+                gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
+                g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
+                g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
+            }
+        };
+
+        // 3. Verify recursion proof
+        let recursion_verifier = {
+            let _span = tracing::info_span!("stage8_create_recursion_verifier").entered();
+            RecursionVerifier::<Fq>::new(verifier_input)
+        };
+
+        // Sample the same challenges from the main transcript that the prover did
+        let _gamma: Fq = self.transcript.challenge_scalar();
+        let _delta: Fq = self.transcript.challenge_scalar();
+
+        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
+
+        // Use cached Hyrax setup from preprocessing (avoids 40ms regeneration)
+        let hyrax_verifier_setup = &self.preprocessing.hyrax_recursion_setup;
+        assert!(
+            metadata.dense_num_vars <= MAX_RECURSION_DENSE_NUM_VARS,
+            "dense_num_vars {} exceeds max {}",
+            metadata.dense_num_vars,
+            MAX_RECURSION_DENSE_NUM_VARS
+        );
+
+        // Add dense commitment to transcript (must match prover's order)
+        self.transcript
+            .append_serializable(&recursion_proof.dense_commitment);
+
+        let verification_result = {
+            let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
+            recursion_verifier
+                .verify::<ProofTranscript, HyraxPCS>(
+                    recursion_proof,
+                    &mut self.transcript,
+                    &recursion_proof.dense_commitment,
+                    hyrax_verifier_setup,
+                )
+                .map_err(|e| anyhow::anyhow!("Recursion verification failed: {e:?}"))?
+        };
+
+        if !verification_result {
+            return Err(anyhow::anyhow!("Recursion proof verification failed"));
+        }
+
+        Ok(())
+    }
 }
+
+// =============================================================================
+// Preprocessing types
+// =============================================================================
 
 /// Shared preprocessing data between Full and Committed program modes.
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
@@ -867,6 +1051,8 @@ where
     pub shared: SharedPreprocessing,
     pub ram: crate::zkvm::ram::RAMPreprocessing,
     pub memory_layout: MemoryLayout,
+    /// Cached Hyrax setup for recursion verification (avoids 40ms regeneration per verify)
+    pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
 }
 
 impl<F, PCS> Serializable for JoltVerifierPreprocessing<F, PCS>
