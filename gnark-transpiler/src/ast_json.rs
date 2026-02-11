@@ -173,6 +173,12 @@ impl From<Node> for NodeJson {
                 left: left.into(),
                 right: right.into(),
             },
+            Node::FqNeg(child) => NodeJson::Neg {
+                child: child.into(),
+            },
+            Node::FqTruncate128(input) => NodeJson::Truncate128 {
+                input: input.into(),
+            },
         }
     }
 }

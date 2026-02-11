@@ -296,6 +296,13 @@ pub enum Node {
     FqAdd(Edge, Edge),
     /// Fq-field subtraction (emulated in Gnark circuit).
     FqSub(Edge, Edge),
+    /// Fq-field negation (emulated in Gnark circuit).
+    FqNeg(Edge),
+    /// Fq-field challenge truncation (simple from_u128 semantics).
+    /// Used for challenge_scalar_optimized in Fq mode (produces Mont254BitChallenge).
+    /// Unlike Truncate128Reverse (which applies 125-bit mask + R^-1 for MontU128Challenge),
+    /// this uses standard from_u128: BigInt([low, high, 0, 0]) -> from_bigint().
+    FqTruncate128(Edge),
 }
 
 /// An AST intended for representing an MLE computation (although it will actually work for any
@@ -430,6 +437,19 @@ impl MleAst {
         }
     }
 
+    /// Fq-field challenge truncation (simple from_u128 semantics).
+    /// Used for challenge_scalar_optimized in Fq mode (produces Mont254BitChallenge).
+    /// Unlike truncate_128_reverse (for MontU128Challenge with 125-bit mask + R^-1),
+    /// this uses standard from_u128: take low 128 bits -> BigInt([low, high, 0, 0]) -> from_bigint.
+    pub fn fq_truncate_128(input: &Self) -> Self {
+        let edge = edge_for_root(input.root);
+        let root = insert_node(Node::FqTruncate128(edge));
+        Self {
+            root,
+            reg_name: input.reg_name,
+        }
+    }
+
     /// Multiply a value by 2^192 (BE-padding transformation for append_u64).
     ///
     /// This is used for the BE-padding transformation in append_u64:
@@ -486,7 +506,8 @@ fn is_node_constant(node_id: NodeId) -> bool {
         Node::Atom(Atom::Var(_)) => false,
         Node::Atom(Atom::NamedVar(_)) => false,
         Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e)
-        | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) => {
+        | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e)
+        | Node::FqNeg(e) | Node::FqTruncate128(e) => {
             is_edge_constant(e)
         }
         Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2)
@@ -592,6 +613,11 @@ fn scalar_sub_mod_fq(a: Scalar, b: Scalar) -> Scalar {
 /// Multiply mod Fq (BN254 base field)
 fn scalar_mul_mod_fq(a: Scalar, b: Scalar) -> Scalar {
     scalar_mul_mod_p(a, b, &BN254_FQ_MODULUS)
+}
+
+/// Negate mod Fq (BN254 base field)
+fn scalar_neg_mod_fq(a: Scalar) -> Scalar {
+    scalar_neg_mod_p(a, &BN254_FQ_MODULUS)
 }
 
 /// Add mod arbitrary modulus
@@ -707,11 +733,13 @@ fn evaluate_constant_node(node_id: NodeId) -> Scalar {
         Node::FqMul(e1, e2) => {
             scalar_mul_mod_fq(evaluate_constant_edge(e1), evaluate_constant_edge(e2))
         }
+        Node::FqNeg(e) => scalar_neg_mod_fq(evaluate_constant_edge(e)),
         Node::Inv(_) | Node::Div(_, _) => {
             panic!("Modular inverse not implemented for constant evaluation")
         }
         Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_)
-        | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) => {
+        | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_)
+        | Node::FqTruncate128(_) => {
             panic!("Hash/transform operations cannot be evaluated as constants")
         }
     }
@@ -729,13 +757,13 @@ fn evaluate_edge<F: JoltField>(edge: Edge, env: &Environment<F>) -> F {
 fn evaluate_node<F: JoltField>(node: NodeId, env: &Environment<F>) -> F {
     match get_node(node) {
         Node::Atom(atom) => atom.evaluate(env),
-        Node::Neg(edge) => -evaluate_edge(edge, env),
+        Node::Neg(edge) | Node::FqNeg(edge) => -evaluate_edge(edge, env),
         Node::Inv(edge) => F::one() / evaluate_edge(edge, env),
         Node::Add(e1, e2) | Node::FqAdd(e1, e2) => evaluate_edge(e1, env) + evaluate_edge(e2, env),
         Node::Mul(e1, e2) | Node::FqMul(e1, e2) => evaluate_edge(e1, env) * evaluate_edge(e2, env),
         Node::Sub(e1, e2) | Node::FqSub(e1, e2) => evaluate_edge(e1, env) - evaluate_edge(e2, env),
         Node::Div(e1, e2) => evaluate_edge(e1, env) / evaluate_edge(e2, env),
-        Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_) | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) => {
+        Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_) | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) | Node::FqTruncate128(_) => {
             // Hash/transform nodes are for circuit generation only, not field evaluation
             unreachable!("Hash/transform nodes should not appear in zklean-extractor tests")
         }
@@ -797,13 +825,14 @@ fn node_depth(node: Node) -> usize {
     }
     match node {
         Node::Atom(_) => 0,
-        Node::Neg(e) => 1 + edge_depth(e),
+        Node::Neg(e) | Node::FqNeg(e) => 1 + edge_depth(e),
         Node::Inv(e) => 1 + edge_depth(e),
         Node::Keccak256(e) => 1 + edge_depth(e),
         Node::ByteReverse(e) => 1 + edge_depth(e),
         Node::Truncate128Reverse(e) => 1 + edge_depth(e),
         Node::Truncate128(e) => 1 + edge_depth(e),
         Node::MulTwoPow192(e) => 1 + edge_depth(e),
+        Node::FqTruncate128(e) => 1 + edge_depth(e),
         Node::Add(e1, e2) | Node::FqAdd(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Mul(e1, e2) | Node::FqMul(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Sub(e1, e2) | Node::FqSub(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
@@ -936,9 +965,17 @@ pub fn common_subexpression_elimination(node: Node) -> (Vec<Node>, Node) {
                 let cse_e2 = aux_edge(bindings, nodes, e2);
                 register(bindings, nodes, Node::FqSub(cse_e1, cse_e2))
             }
+            Node::FqNeg(e) => {
+                let cse_e = aux_edge(bindings, nodes, e);
+                register(bindings, nodes, Node::FqNeg(cse_e))
+            }
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::MulTwoPow192(cse_e))
+            }
+            Node::FqTruncate128(e) => {
+                let cse_e = aux_edge(bindings, nodes, e);
+                register(bindings, nodes, Node::FqTruncate128(cse_e))
             }
         }
     }
@@ -1068,9 +1105,17 @@ pub fn common_subexpression_elimination_incremental(
                 let cse_e2 = aux_edge(bindings, nodes, e2);
                 register(bindings, nodes, Node::FqSub(cse_e1, cse_e2))
             }
+            Node::FqNeg(e) => {
+                let cse_e = aux_edge(bindings, nodes, e);
+                register(bindings, nodes, Node::FqNeg(cse_e))
+            }
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::MulTwoPow192(cse_e))
+            }
+            Node::FqTruncate128(e) => {
+                let cse_e = aux_edge(bindings, nodes, e);
+                register(bindings, nodes, Node::FqTruncate128(cse_e))
             }
         }
     }
@@ -1190,6 +1235,16 @@ fn fmt_node(
             fmt_edge(f, fmt_data, e1, false)?;
             write!(f, ", ")?;
             fmt_edge(f, fmt_data, e2, false)?;
+            write!(f, ")")
+        }
+        Node::FqNeg(edge) => {
+            write!(f, "fq_neg(")?;
+            fmt_edge(f, fmt_data, edge, false)?;
+            write!(f, ")")
+        }
+        Node::FqTruncate128(edge) => {
+            write!(f, "fq_truncate_128(")?;
+            fmt_edge(f, fmt_data, edge, false)?;
             write!(f, ")")
         }
     }
@@ -1313,7 +1368,7 @@ impl std::ops::Neg for MleAst {
     type Output = Self;
 
     fn neg(mut self) -> Self::Output {
-        self.unop(Node::Neg);
+        self.unop(if is_fq_mode() { Node::FqNeg } else { Node::Neg });
         self
     }
 }

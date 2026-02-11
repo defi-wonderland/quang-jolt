@@ -33,6 +33,7 @@ use ark_ec::CurveGroup;
 use ark_serialize::CanonicalSerialize;
 use jolt_core::field::JoltField;
 use jolt_core::transcripts::Transcript;
+use jolt_core::zkvm::fq_mode::is_fq_mode;
 use std::borrow::Borrow;
 use jolt_core::zkvm::dory_replay::take_pending_dory_absorb_indices;
 use zklean_extractor::mle_ast::{set_pending_challenge, take_pending_append, take_pending_commitment_chunks, MleAst};
@@ -401,7 +402,14 @@ impl Transcript for PoseidonAstTranscript {
         );
 
         let hash = self.challenge_mle();
-        let challenge = MleAst::truncate_128_reverse(&hash);
+        // Use different truncation depending on whether we're in Fq mode:
+        // - Fr mode: Truncate128Reverse (125-bit mask + R^-1 for MontU128Challenge)
+        // - Fq mode: FqTruncate128 (simple from_u128 for Mont254BitChallenge)
+        let challenge = if is_fq_mode() {
+            MleAst::fq_truncate_128(&hash)
+        } else {
+            MleAst::truncate_128_reverse(&hash)
+        };
         set_pending_challenge(challenge);
         // The pending_challenge mechanism: F::from_bytes returns the pending challenge for MleAst
         let f_val: F = F::from_bytes(&[0u8; 16]);
@@ -424,7 +432,12 @@ impl Transcript for PoseidonAstTranscript {
         (0..len)
             .map(|_| {
                 let hash = self.challenge_mle();
-                let challenge = MleAst::truncate_128_reverse(&hash);
+                // Use different truncation depending on whether we're in Fq mode
+                let challenge = if is_fq_mode() {
+                    MleAst::fq_truncate_128(&hash)
+                } else {
+                    MleAst::truncate_128_reverse(&hash)
+                };
                 set_pending_challenge(challenge);
                 let f_val: F = F::from_bytes(&[0u8; 16]);
                 // SAFETY: Verified F = MleAst above

@@ -18,6 +18,7 @@ func init() {
 	solver.RegisterHint(truncate128ReverseHint)
 	solver.RegisterHint(truncate128Hint)
 	solver.RegisterHint(appendU64TransformHint)
+	solver.RegisterHint(fqTruncate128Hint)
 }
 
 const BN254_FULL_ROUNDS int = 8
@@ -446,5 +447,63 @@ func appendU64TransformHint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) e
 		be[i] = packed[31-i]
 	}
 	outputs[0] = new(big.Int).SetBytes(be)
+	return nil
+}
+
+// FqTruncate128 truncates to 128 bits for Fq challenge derivation.
+// This implements Mont254BitChallenge::from(u128) semantics used when F = Fq.
+//
+// Unlike Truncate128Reverse (for MontU128Challenge with Fr):
+// - NO 125-bit mask
+// - NO Montgomery R^-1 multiplication
+// - Simple from_u128: BigInt([low, high, 0, 0]) -> from_bigint()
+//
+// This matches Rust's Mont254BitChallenge::from(u128) which calls F::from_u128(val)
+// where from_u128 does: BigInt::new([val as u64, (val >> 64) as u64, 0, 0]) -> from_bigint()
+func FqTruncate128(api frontend.API, x frontend.Variable) frontend.Variable {
+	result, err := api.Compiler().NewHint(fqTruncate128Hint, 1, x)
+	if err != nil {
+		panic(err)
+	}
+	return result[0]
+}
+
+// fqTruncate128Hint computes simple from_u128 for Fq challenge derivation.
+//
+// Rust Mont254BitChallenge::from(u128) does:
+// 1. Take u128 value from challenge_u128() - low 128 bits of hash
+// 2. Call F::from_u128(val) which:
+//    - Creates BigInt::new([val as u64, (val >> 64) as u64, 0, 0])
+//    - Calls from_bigint() for proper Montgomery conversion
+//
+// In gnark terms, this is simply: interpret low 128 bits as a field element.
+// No masking, no R^-1 multiplication needed.
+func fqTruncate128Hint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	if len(inputs) != 1 || len(outputs) != 1 {
+		return nil
+	}
+
+	// Convert to 32-byte LE representation (like Rust serialize_uncompressed)
+	inputBytes := inputs[0].Bytes() // big-endian from big.Int
+	le := make([]byte, 32)
+	for i := 0; i < len(inputBytes) && i < 32; i++ {
+		le[i] = inputBytes[len(inputBytes)-1-i]
+	}
+
+	// Take first 16 bytes (low 128 bits in LE format)
+	le16 := le[:16]
+
+	// Reverse bytes to match Rust challenge_u128 behavior
+	// Rust does: challenge_bytes fills LE, then reverse, then from_be_bytes
+	// So we reverse le16 to get BE, then SetBytes interprets as BE
+	for i := 0; i < 8; i++ {
+		le16[i], le16[15-i] = le16[15-i], le16[i]
+	}
+	value128 := new(big.Int).SetBytes(le16)
+
+	// For Mont254BitChallenge, we just return the value directly.
+	// from_u128 does proper Montgomery conversion via from_bigint,
+	// but in circuit constraints, the value is already in the correct form.
+	outputs[0] = value128
 	return nil
 }

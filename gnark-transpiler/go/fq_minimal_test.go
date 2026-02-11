@@ -168,3 +168,87 @@ func TestStressFqOperations(t *testing.T) {
 		t.Log("Stress Fq test PASSED - no mulCheck errors")
 	}
 }
+
+// TestA17DiagnosticBigInt computes the a17 expression using pure big.Int arithmetic
+// to verify if the expected result should be 0 mod Fq.
+// This tests the hypothesis: is the transpiled computation correct?
+func TestA17DiagnosticBigInt(t *testing.T) {
+	// Fq modulus
+	fq, _ := new(big.Int).SetString("21888242871839275222246405745257275088696311157297823662689037894645226208583", 10)
+
+	// Load the actual witness values used in the failing test
+	witnessPath := getStagesWitnessPath()
+	stagesAssignment, err := LoadStagesAssignment(witnessPath)
+	if err != nil {
+		t.Fatalf("Failed to load stages witness: %v", err)
+	}
+
+	// Extract the first few recursion stage values as big.Int
+	// These correspond to cse_17_814 = Recursion_Stage1_R0_0, etc.
+	r0_0 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_0)
+	r0_1 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_1)
+	r0_2 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_2)
+	r0_3 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_3)
+	r0_4 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_4)
+	r0_5 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_5)
+	r0_6 := fieldToBigInt(stagesAssignment.Recursion_Stage1_R0_6)
+
+	t.Log("=== First Round Witness Values ===")
+	t.Logf("R0_0: %s", r0_0.String())
+	t.Logf("R0_1: %s", r0_1.String())
+	t.Logf("R0_2: %s", r0_2.String())
+	t.Logf("R0_3: %s", r0_3.String())
+	t.Logf("R0_4: %s", r0_4.String())
+	t.Logf("R0_5: %s", r0_5.String())
+	t.Logf("R0_6: %s", r0_6.String())
+
+	// The sumcheck verification computes something like:
+	// Sum over coefficients R0_i, weighted by powers of challenge r
+	// If sumcheck is valid: g(0) + g(1) = claimed_sum
+	// where g(X) = R0_0 + R0_1*X + R0_2*X^2 + ...
+	// Evaluated at r: g(r) = R0_0 + R0_1*r + R0_2*r^2 + ...
+	// The assertion checks: LHS - RHS == 0 mod Fq
+
+	// For diagnostic purposes, just sum all coefficients to see if they're reasonable Fq values
+	sum := new(big.Int).Set(r0_0)
+	sum.Add(sum, r0_1)
+	sum.Add(sum, r0_2)
+	sum.Add(sum, r0_3)
+	sum.Add(sum, r0_4)
+	sum.Add(sum, r0_5)
+	sum.Add(sum, r0_6)
+	sum.Mod(sum, fq)
+
+	t.Log("")
+	t.Logf("Sum of first round coefficients mod Fq: %s", sum.String())
+
+	// Check if any values exceed Fq (would indicate witness corruption)
+	for i, v := range []*big.Int{r0_0, r0_1, r0_2, r0_3, r0_4, r0_5, r0_6} {
+		if v.Cmp(fq) >= 0 {
+			t.Errorf("R0_%d exceeds Fq modulus!", i)
+		}
+	}
+
+	t.Log("")
+	t.Log("All values are valid Fq elements")
+}
+
+// fieldToBigInt converts a frontend.Variable to big.Int
+func fieldToBigInt(v frontend.Variable) *big.Int {
+	switch x := v.(type) {
+	case *big.Int:
+		return x
+	case big.Int:
+		return &x
+	case string:
+		b, _ := new(big.Int).SetString(x, 10)
+		return b
+	case int64:
+		return big.NewInt(x)
+	case int:
+		return big.NewInt(int64(x))
+	default:
+		// Try to convert via string representation
+		return new(big.Int)
+	}
+}

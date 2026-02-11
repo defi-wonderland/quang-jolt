@@ -48,7 +48,7 @@ pub struct MemoizedCodeGen {
     var_names: HashMap<u16, String>,
     /// Optional constraint index for per-constraint CSE naming (None = global CSE)
     constraint_idx: Option<usize>,
-    /// Node IDs that produce Fq (emulated) values (FqMul/FqAdd/FqSub outputs)
+    /// Node IDs that produce Fq (emulated) values (FqMul/FqAdd/FqSub/FqNeg outputs)
     fq_node_ids: HashSet<usize>,
     /// Var indices that are Fq fields (referenced from Fq nodes as proof data)
     fq_vars: BTreeSet<u16>,
@@ -156,7 +156,7 @@ impl MemoizedCodeGen {
                 let node = get_node(node_id);
                 match node {
                     Node::Atom(_) => {}
-                    Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e) | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) => {
+                    Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e) | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) | Node::FqNeg(e) | Node::FqTruncate128(e) => {
                         if let Edge::NodeRef(id) = e {
                             stack.push(id);
                         }
@@ -238,7 +238,8 @@ impl MemoizedCodeGen {
             match node {
                 Node::Atom(_) => {}
                 Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e)
-                | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) => {
+                | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e)
+                | Node::FqNeg(e) | Node::FqTruncate128(e) => {
                     if let Edge::NodeRef(id) = e {
                         if !visited.contains(&id) {
                             stack.push((id, false));
@@ -370,6 +371,19 @@ impl MemoizedCodeGen {
                     let l = self.edge_to_gnark_fq(left);
                     let r = self.edge_to_gnark_fq(right);
                     format!("fqField.Sub({}, {})", l, r)
+                }
+                Node::FqNeg(inner) => {
+                    self.fq_node_ids.insert(node_id);
+                    self.has_fq = true;
+                    let i = self.edge_to_gnark_fq(inner);
+                    format!("fqField.Neg({})", i)
+                }
+                Node::FqTruncate128(input) => {
+                    // FqTruncate128 is used for Fq challenge derivation.
+                    // The result is used in Fq operations, but the truncation itself
+                    // operates on an Fr value (Poseidon hash output).
+                    let i = self.edge_to_gnark_iterative(input);
+                    format!("poseidon.FqTruncate128(api, {})", i)
                 }
             };
 
