@@ -1384,6 +1384,7 @@ dependencies = [
  "jolt-core",
  "light-poseidon",
  "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
  "zklean-extractor",

@@ -448,8 +448,8 @@ impl<F: PrimeField, P: PoseidonParams<F>> Transcript for PoseidonTranscript<F, P
         q_powers
     }
 
-    fn debug_state(&self, label: &str) {
-        eprintln!("REAL [{}]: n_rounds={}", label, self.n_rounds);
+    fn debug_state(&self, _label: &str) {
+        // Debug output disabled for production
     }
 }
 

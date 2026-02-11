@@ -6,7 +6,7 @@
 //! NOTE: This is adapted for the quangvdao fork which has stages 6a, 6b, 7, 8 (Hyrax-based).
 //! We transpile stages 1-7 (all sumcheck stages before the final Hyrax opening).
 
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use ark_serialize::CanonicalDeserialize;
 use clap::Parser;
 use serde::Serialize;
@@ -32,6 +32,7 @@ use zklean_extractor::mle_ast::{enable_constraint_mode, take_constraints as take
 const STAGES_CIRCUIT_FILENAME: &str = "stages_circuit.go";
 const STAGES_WITNESS_FILENAME: &str = "stages_witness.json";
 const HYRAX_WITNESS_FILENAME: &str = "hyrax_witness.json";
+const RECURSION_WITNESS_FILENAME: &str = "recursion_witness.json";
 
 /// Transpile Jolt proofs to gnark circuits for Groth16 proving.
 ///
@@ -141,54 +142,19 @@ fn main() {
             hyrax_recursion_setup: real_preprocessing.hyrax_recursion_setup.clone(),
         };
 
-    // === Run real verifier for debug comparison ===
-    // Re-deserialize the proof to get a fresh copy (JoltProof doesn't implement Clone)
-    println!("\n=== Running REAL Verifier for n_rounds Comparison ===");
-    {
-        use jolt_core::zkvm::verifier::JoltVerifier;
-        use jolt_core::transcripts::PoseidonTranscriptFr;
-
-        let real_proof_copy: RV64IMACProof =
-            CanonicalDeserialize::deserialize_compressed(&proof_bytes[..])
-                .expect("Failed to re-deserialize proof for real verifier");
-        let io_device_copy = io_device.clone();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match JoltVerifier::<ark_bn254::Fr, DoryCommitmentScheme, PoseidonTranscriptFr>::new(
-                &real_preprocessing,
-                real_proof_copy,
-                io_device_copy,
-                None,
-                None,
-            ) {
-                Ok(verifier) => {
-                    match verifier.verify() {
-                        Ok(()) => println!("  Real verification SUCCEEDED"),
-                        Err(e) => eprintln!("  Real verification error (expected, we just need n_rounds): {:?}", e),
-                    }
-                }
-                Err(e) => eprintln!("  Failed to create real verifier: {:?}", e),
-            }
-        }));
-        if let Err(e) = result {
-            eprintln!("  Real verifier panicked (expected): {:?}", e);
-        }
-        println!("  (Check REAL [...] debug_state prints above)");
-    }
-
     // Symbolize the proof (creates full JoltProof with symbolic sumcheck coefficients)
+    // NOTE: We only symbolize stages 1-7 (transpiled). Stage 8 recursion sumchecks
+    // are handled by hand-written Gnark code in hyrax/ package, NOT transpiled.
     println!("\n=== Symbolizing Proof ===");
-    let (symbolic_proof, accumulator, mut var_alloc) = symbolize_jolt_proof(&real_proof);
-    println!("  Jolt proof symbolic variables: {}", var_alloc.next_idx());
-
-    // Symbolize the recursion proof (for stage 8 recursion sumchecks)
-    let symbolic_recursion_proof = gnark_transpiler::symbolize_recursion_proof(&real_proof, &mut var_alloc);
-    println!("  Total symbolic variables (with recursion): {}", var_alloc.next_idx());
+    let (symbolic_proof, accumulator, var_alloc) = symbolize_jolt_proof(&real_proof);
+    println!("  Total symbolic variables: {}", var_alloc.next_idx());
 
     // Create transcript
     let transcript: PoseidonAstTranscript = Transcript::new(b"Jolt");
 
     // Create TranspilableVerifier with symbolic types
+    // NOTE: We pass None for symbolic_recursion_proof to skip stage 8 (recursion sumchecks).
+    // Stage 8 is handled by hand-written Gnark code in hyrax/ package.
     println!("\n=== Creating TranspilableVerifier ===");
     let verifier = TranspilableVerifier::<
         MleAst,
@@ -202,13 +168,15 @@ fn main() {
         None, // trusted_advice_commitment
         transcript,
         accumulator,
-        Some(symbolic_recursion_proof),
+        None, // symbolic_recursion_proof - handled by hand-written Gnark code
     );
 
     // Enable assertion mode so MleAst comparisons register equality checks
     enable_constraint_mode();
 
     // Run verification stages 1-7 (all sumcheck stages, excluding Hyrax opening)
+    // NOTE: Stage 8 (Hyrax PCS + recursion sumchecks) is handled by hand-written Gnark code
+    // The verify() method skips stage 8 when symbolic_recursion_proof is None.
     println!("\n=== Running Symbolic Verification (Stages 1-7) ===");
     match verifier.verify() {
         Ok(()) => println!("  Stages 1-7 verification completed successfully"),
@@ -291,9 +259,24 @@ fn main() {
     println!("  L: {} elements", hyrax_witness.l.len());
     println!("  R: {} elements", hyrax_witness.r.len());
 
+    // === Extract Recursion Sumcheck Witness Data ===
+    println!("\n=== Extracting Recursion Sumcheck Witness Data ===");
+    let recursion_witness = extract_recursion_witness(&real_proof);
+
+    let recursion_witness_json = serde_json::to_string_pretty(&recursion_witness).expect("Failed to serialize recursion witness");
+    let recursion_witness_path = output_dir.join(RECURSION_WITNESS_FILENAME);
+    std::fs::write(&recursion_witness_path, &recursion_witness_json)
+        .unwrap_or_else(|e| panic!("Failed to write recursion witness file {:?}: {}", recursion_witness_path, e));
+    println!("  Recursion witness written to: {:?}", recursion_witness_path);
+    println!("  Stage 1: {} rounds, degree 7", recursion_witness.stage1_coeffs.len());
+    println!("  Stage 2: {} rounds, degree 6", recursion_witness.stage2_coeffs.len());
+    println!("  Stage 4: {} rounds, degree 2", recursion_witness.stage4_coeffs.len());
+    println!("  Stage 5: {} rounds, degree 2", recursion_witness.stage5_coeffs.len());
+
     println!("\n=== SUCCESS ===");
     println!("TranspilableVerifier stages 1-7 transpiled to Gnark circuit.");
     println!("Hyrax witness data extracted for Stage 8 verification.");
+    println!("Recursion sumcheck witness data extracted.");
 }
 
 /// Hyrax witness data for Gnark circuit
@@ -425,10 +408,9 @@ fn extract_hyrax_witness(
         }
     }
 
-    // If we didn't find the opening claim, use placeholder
+    // If we didn't find the opening claim, panic
     let (opening_point_vec, v_string) = match (opening_point_opt, v_value) {
         (Some(point), Some(v)) => {
-            let point_strings: Vec<String> = point.iter().map(|f| f.into_bigint().to_string()).collect();
             let v_str = v.into_bigint().to_string();
             (point, v_str)
         }
@@ -522,5 +504,264 @@ fn grumpkin_point_to_strings(point: &ark_grumpkin::Affine) -> [String; 2] {
         x.into_bigint().to_string(),
         y.into_bigint().to_string(),
     ]
+}
+
+/// Recursion sumcheck witness data for gnark circuit
+/// This contains the coefficients and challenges for the emulated Fq sumchecks
+#[derive(Serialize)]
+struct RecursionWitness {
+    /// Stage 1 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2, c3, c4, c5, c6, c7]
+    stage1_coeffs: Vec<Vec<String>>,
+    /// Stage 2 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2, c3, c4, c5, c6]
+    stage2_coeffs: Vec<Vec<String>>,
+    /// Stage 4 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2]
+    stage4_coeffs: Vec<Vec<String>>,
+    /// Stage 5 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2]
+    stage5_coeffs: Vec<Vec<String>>,
+    /// Challenges for stage 1 (derived from transcript, provided for testing)
+    stage1_challenges: Vec<String>,
+    /// Challenges for stage 2
+    stage2_challenges: Vec<String>,
+    /// Challenges for stage 4
+    stage4_challenges: Vec<String>,
+    /// Challenges for stage 5
+    stage5_challenges: Vec<String>,
+    /// Expected final evaluation for stage 1
+    stage1_expected: String,
+    /// Expected final evaluation for stage 2
+    stage2_expected: String,
+    /// Expected final evaluation for stage 4
+    stage4_expected: String,
+    /// Expected final evaluation for stage 5
+    stage5_expected: String,
+}
+
+/// Extract recursion sumcheck witness data from JoltProof
+fn extract_recursion_witness(proof: &RV64IMACProof) -> RecursionWitness {
+    use ark_bn254::Fq;
+
+    let recursion_proof = &proof.recursion_proof;
+
+    // Extract stage 1 coefficients (degree 7, so 7 coefficients per round)
+    let stage1_coeffs: Vec<Vec<String>> = recursion_proof
+        .stage1_proof
+        .compressed_polys
+        .iter()
+        .map(|poly| {
+            poly.coeffs_except_linear_term
+                .iter()
+                .map(|c| c.into_bigint().to_string())
+                .collect()
+        })
+        .collect();
+
+    // Extract stage 2 coefficients (degree 6, so 6 coefficients per round)
+    let stage2_coeffs: Vec<Vec<String>> = recursion_proof
+        .stage2_proof
+        .compressed_polys
+        .iter()
+        .map(|poly| {
+            poly.coeffs_except_linear_term
+                .iter()
+                .map(|c| c.into_bigint().to_string())
+                .collect()
+        })
+        .collect();
+
+    // Extract stage 4 coefficients (degree 2, so 2 coefficients per round)
+    let stage4_coeffs: Vec<Vec<String>> = recursion_proof
+        .stage4_proof
+        .compressed_polys
+        .iter()
+        .map(|poly| {
+            poly.coeffs_except_linear_term
+                .iter()
+                .map(|c| c.into_bigint().to_string())
+                .collect()
+        })
+        .collect();
+
+    // Extract stage 5 coefficients (degree 2, so 2 coefficients per round)
+    let stage5_coeffs: Vec<Vec<String>> = recursion_proof
+        .stage5_proof
+        .sumcheck_proof
+        .compressed_polys
+        .iter()
+        .map(|poly| {
+            poly.coeffs_except_linear_term
+                .iter()
+                .map(|c| c.into_bigint().to_string())
+                .collect()
+        })
+        .collect();
+
+    // For challenges and expected values, we use placeholder test values
+    // since the actual challenges come from the transcript during verification.
+    // These test values allow circuit testing with deterministic inputs.
+    let fq_modulus: ark_ff::BigInt<4> = Fq::MODULUS;
+
+    // Generate test challenges (simple sequential values for testing)
+    let stage1_challenges: Vec<String> = (0..stage1_coeffs.len())
+        .map(|i| (i + 1).to_string())
+        .collect();
+    let stage2_challenges: Vec<String> = (0..stage2_coeffs.len())
+        .map(|i| (i + 100).to_string())
+        .collect();
+    let stage4_challenges: Vec<String> = (0..stage4_coeffs.len())
+        .map(|i| (i + 200).to_string())
+        .collect();
+    let stage5_challenges: Vec<String> = (0..stage5_coeffs.len())
+        .map(|i| (i + 300).to_string())
+        .collect();
+
+    // Compute expected values using the test challenges
+    let stage1_expected = compute_sumcheck_eval_degree7(&stage1_coeffs, &stage1_challenges, &fq_modulus);
+    let stage2_expected = compute_sumcheck_eval_degree6(&stage2_coeffs, &stage2_challenges, &fq_modulus);
+    let stage4_expected = compute_sumcheck_eval_degree2(&stage4_coeffs, &stage4_challenges, &fq_modulus);
+    let stage5_expected = compute_sumcheck_eval_degree2(&stage5_coeffs, &stage5_challenges, &fq_modulus);
+
+    RecursionWitness {
+        stage1_coeffs,
+        stage2_coeffs,
+        stage4_coeffs,
+        stage5_coeffs,
+        stage1_challenges,
+        stage2_challenges,
+        stage4_challenges,
+        stage5_challenges,
+        stage1_expected,
+        stage2_expected,
+        stage4_expected,
+        stage5_expected,
+    }
+}
+
+/// Compute sumcheck evaluation for degree-7 polynomials
+fn compute_sumcheck_eval_degree7(
+    coeffs: &[Vec<String>],
+    challenges: &[String],
+    modulus: &ark_ff::BigInt<4>,
+) -> String {
+    use num_bigint::BigUint;
+    use num_traits::Zero;
+
+    let fq_mod = BigUint::from_bytes_be(&modulus.to_bytes_be());
+    let two = BigUint::from(2u32);
+    let mut prev_eval = BigUint::zero();
+
+    for (round, c) in coeffs.iter().enumerate() {
+        let c0 = c[0].parse::<BigUint>().unwrap();
+        let c2 = c[1].parse::<BigUint>().unwrap();
+        let c3 = c[2].parse::<BigUint>().unwrap();
+        let c4 = c[3].parse::<BigUint>().unwrap();
+        let c5 = c[4].parse::<BigUint>().unwrap();
+        let c6 = c[5].parse::<BigUint>().unwrap();
+        let c7 = c[6].parse::<BigUint>().unwrap();
+        let r = challenges[round].parse::<BigUint>().unwrap();
+
+        // c1 = prev_eval - 2*c0 - c2 - c3 - c4 - c5 - c6 - c7
+        let two_c0 = (&two * &c0) % &fq_mod;
+        let mut c1 = (&fq_mod + &prev_eval - &two_c0) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c2) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c3) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c4) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c5) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c6) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c7) % &fq_mod;
+
+        // Horner's evaluation
+        let mut acc = c7.clone();
+        acc = (&r * &acc + &c6) % &fq_mod;
+        acc = (&r * &acc + &c5) % &fq_mod;
+        acc = (&r * &acc + &c4) % &fq_mod;
+        acc = (&r * &acc + &c3) % &fq_mod;
+        acc = (&r * &acc + &c2) % &fq_mod;
+        acc = (&r * &acc + &c1) % &fq_mod;
+        acc = (&r * &acc + &c0) % &fq_mod;
+
+        prev_eval = acc;
+    }
+
+    prev_eval.to_string()
+}
+
+/// Compute sumcheck evaluation for degree-6 polynomials
+fn compute_sumcheck_eval_degree6(
+    coeffs: &[Vec<String>],
+    challenges: &[String],
+    modulus: &ark_ff::BigInt<4>,
+) -> String {
+    use num_bigint::BigUint;
+    use num_traits::Zero;
+
+    let fq_mod = BigUint::from_bytes_be(&modulus.to_bytes_be());
+    let two = BigUint::from(2u32);
+    let mut prev_eval = BigUint::zero();
+
+    for (round, c) in coeffs.iter().enumerate() {
+        let c0 = c[0].parse::<BigUint>().unwrap();
+        let c2 = c[1].parse::<BigUint>().unwrap();
+        let c3 = c[2].parse::<BigUint>().unwrap();
+        let c4 = c[3].parse::<BigUint>().unwrap();
+        let c5 = c[4].parse::<BigUint>().unwrap();
+        let c6 = c[5].parse::<BigUint>().unwrap();
+        let r = challenges[round].parse::<BigUint>().unwrap();
+
+        // c1 = prev_eval - 2*c0 - c2 - c3 - c4 - c5 - c6
+        let two_c0 = (&two * &c0) % &fq_mod;
+        let mut c1 = (&fq_mod + &prev_eval - &two_c0) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c2) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c3) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c4) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c5) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c6) % &fq_mod;
+
+        // Horner's evaluation
+        let mut acc = c6.clone();
+        acc = (&r * &acc + &c5) % &fq_mod;
+        acc = (&r * &acc + &c4) % &fq_mod;
+        acc = (&r * &acc + &c3) % &fq_mod;
+        acc = (&r * &acc + &c2) % &fq_mod;
+        acc = (&r * &acc + &c1) % &fq_mod;
+        acc = (&r * &acc + &c0) % &fq_mod;
+
+        prev_eval = acc;
+    }
+
+    prev_eval.to_string()
+}
+
+/// Compute sumcheck evaluation for degree-2 polynomials
+fn compute_sumcheck_eval_degree2(
+    coeffs: &[Vec<String>],
+    challenges: &[String],
+    modulus: &ark_ff::BigInt<4>,
+) -> String {
+    use num_bigint::BigUint;
+    use num_traits::Zero;
+
+    let fq_mod = BigUint::from_bytes_be(&modulus.to_bytes_be());
+    let two = BigUint::from(2u32);
+    let mut prev_eval = BigUint::zero();
+
+    for (round, c) in coeffs.iter().enumerate() {
+        let c0 = c[0].parse::<BigUint>().unwrap();
+        let c2 = c[1].parse::<BigUint>().unwrap();
+        let r = challenges[round].parse::<BigUint>().unwrap();
+
+        // c1 = prev_eval - 2*c0 - c2
+        let two_c0 = (&two * &c0) % &fq_mod;
+        let mut c1 = (&fq_mod + &prev_eval - &two_c0) % &fq_mod;
+        c1 = (&fq_mod + &c1 - &c2) % &fq_mod;
+
+        // Horner's evaluation: c0 + r*(c1 + r*c2)
+        let mut acc = c2.clone();
+        acc = (&r * &acc + &c1) % &fq_mod;
+        acc = (&r * &acc + &c0) % &fq_mod;
+
+        prev_eval = acc;
+    }
+
+    prev_eval.to_string()
 }
 

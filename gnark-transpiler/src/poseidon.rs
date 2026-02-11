@@ -438,8 +438,8 @@ impl Transcript for PoseidonAstTranscript {
         vec![F::zero(); len]
     }
 
-    fn debug_state(&self, label: &str) {
-        eprintln!("SYMBOLIC [{}]: n_rounds={}", label, self.n_rounds);
+    fn debug_state(&self, _label: &str) {
+        // Debug output disabled for production use
     }
 }
 
