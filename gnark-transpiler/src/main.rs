@@ -7,18 +7,19 @@
 //! We transpile stages 1-7 (all sumcheck stages before the final Hyrax opening).
 
 use ark_ff::PrimeField;
-use ark_serialize::CanonicalDeserialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use clap::Parser;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use gnark_transpiler::{
     symbolize_jolt_proof, extract_witness_values, AstCommitmentScheme, MleOpeningAccumulator,
-    PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit,
+    PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit, VarAllocator,
 };
 use jolt_core::poly::commitment::dory::DoryCommitmentScheme;
 use jolt_core::transcripts::Transcript;
+use jolt_core::zkvm::dory_replay::{DoryReplayOp, set_dory_replay_ops, set_dense_commitment_bytes};
 use jolt_core::zkvm::transpilable_verifier::{
     JoltVerifierPreprocessing as TranspilablePreprocessing, TranspilableVerifier, SharedPreprocessing
 };
@@ -185,6 +186,77 @@ fn main() {
     let symbolic_recursion_proof = gnark_transpiler::symbolize_recursion_proof(&real_proof, &mut var_alloc);
     println!("  Total symbolic variables (with recursion): {}", var_alloc.next_idx());
 
+    // === Build Dory IPA replay ops ===
+    println!("\n=== Building Dory IPA Replay Ops ===");
+    let dory_var_start = var_alloc.next_idx();
+    {
+        let dory = &real_proof.stage8_opening_proof;
+        let mut ops: VecDeque<DoryReplayOp> = VecDeque::new();
+
+        // Helper: serialize element, allocate var indices per 32-byte chunk
+        fn build_absorb_op(
+            element: &impl CanonicalSerialize,
+            alloc: &mut VarAllocator,
+            label: &str,
+        ) -> DoryReplayOp {
+            let mut bytes = Vec::new();
+            element.serialize_compressed(&mut bytes).unwrap();
+            let n_chunks = (bytes.len() + 31) / 32;
+            let var_indices: Vec<u16> = (0..n_chunks)
+                .map(|i| alloc.alloc_idx(&format!("{label}_c{i}")))
+                .collect();
+            DoryReplayOp::Absorb { byte_size: bytes.len(), var_indices }
+        }
+
+        // VMV message (verify_recursive order)
+        ops.push_back(build_absorb_op(&dory.vmv_message.c, &mut var_alloc, "dory_vmv_c"));
+        ops.push_back(build_absorb_op(&dory.vmv_message.d2, &mut var_alloc, "dory_vmv_d2"));
+        ops.push_back(build_absorb_op(&dory.vmv_message.e1, &mut var_alloc, "dory_vmv_e1"));
+
+        // Per-round messages (sigma rounds)
+        for r in 0..dory.first_messages.len() {
+            let first = &dory.first_messages[r];
+            ops.push_back(build_absorb_op(&first.d1_left, &mut var_alloc, &format!("dory_r{r}_d1L")));
+            ops.push_back(build_absorb_op(&first.d1_right, &mut var_alloc, &format!("dory_r{r}_d1R")));
+            ops.push_back(build_absorb_op(&first.d2_left, &mut var_alloc, &format!("dory_r{r}_d2L")));
+            ops.push_back(build_absorb_op(&first.d2_right, &mut var_alloc, &format!("dory_r{r}_d2R")));
+            ops.push_back(build_absorb_op(&first.e1_beta, &mut var_alloc, &format!("dory_r{r}_e1b")));
+            ops.push_back(build_absorb_op(&first.e2_beta, &mut var_alloc, &format!("dory_r{r}_e2b")));
+            ops.push_back(DoryReplayOp::Squeeze); // beta
+
+            let second = &dory.second_messages[r];
+            ops.push_back(build_absorb_op(&second.c_plus, &mut var_alloc, &format!("dory_r{r}_cp")));
+            ops.push_back(build_absorb_op(&second.c_minus, &mut var_alloc, &format!("dory_r{r}_cm")));
+            ops.push_back(build_absorb_op(&second.e1_plus, &mut var_alloc, &format!("dory_r{r}_e1p")));
+            ops.push_back(build_absorb_op(&second.e1_minus, &mut var_alloc, &format!("dory_r{r}_e1m")));
+            ops.push_back(build_absorb_op(&second.e2_plus, &mut var_alloc, &format!("dory_r{r}_e2p")));
+            ops.push_back(build_absorb_op(&second.e2_minus, &mut var_alloc, &format!("dory_r{r}_e2m")));
+            ops.push_back(DoryReplayOp::Squeeze); // alpha
+        }
+
+        // Post-round: gamma and d (NO final_message in verify_recursive!)
+        ops.push_back(DoryReplayOp::Squeeze); // gamma
+        ops.push_back(DoryReplayOp::Squeeze); // d
+
+        let dory_var_count = var_alloc.next_idx() - dory_var_start;
+        println!("  Dory IPA replay: {} ops, {} witness variables (starting at V{})",
+            ops.len(), dory_var_count, dory_var_start);
+        println!("  Rounds (sigma): {}", dory.first_messages.len());
+        set_dory_replay_ops(ops);
+    }
+
+    // === Build dense commitment bytes ===
+    {
+        let mut dense_bytes = Vec::new();
+        real_proof.recursion_proof.dense_commitment
+            .serialize_uncompressed(&mut dense_bytes).unwrap();
+        dense_bytes.reverse(); // matches PoseidonTranscript::append_serializable
+        println!("  Dense commitment bytes: {}", dense_bytes.len());
+        set_dense_commitment_bytes(dense_bytes);
+    }
+
+    println!("  Total symbolic variables (with Dory): {}", var_alloc.next_idx());
+
     // Create transcript
     let transcript: PoseidonAstTranscript = Transcript::new(b"Jolt");
 
@@ -266,6 +338,56 @@ fn main() {
         if let Some(value) = witness_values.get(&(*idx as usize)) {
             witness_map.insert(sanitized, value.clone());
         }
+    }
+
+    // Add Dory witness values (serialize elements in SAME order as replay ops)
+    {
+        let dory = &real_proof.stage8_opening_proof;
+        let mut dory_idx = dory_var_start as usize;
+
+        fn extract_dory_element_witness(
+            element: &impl CanonicalSerialize,
+            dory_idx: &mut usize,
+            var_alloc: &VarAllocator,
+            witness_map: &mut HashMap<String, String>,
+        ) {
+            let mut bytes = Vec::new();
+            element.serialize_compressed(&mut bytes).unwrap();
+            for chunk in bytes.chunks(32) {
+                let mut padded = [0u8; 32];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                let val = ark_bn254::Fr::from_le_bytes_mod_order(&padded);
+                if let Some((_, name)) = var_alloc.descriptions().iter().find(|(id, _)| *id as usize == *dory_idx) {
+                    witness_map.insert(sanitize_go_name(name), format!("{}", val.into_bigint()));
+                }
+                *dory_idx += 1;
+            }
+        }
+
+        // SAME order as replay ops
+        extract_dory_element_witness(&dory.vmv_message.c, &mut dory_idx, &var_alloc, &mut witness_map);
+        extract_dory_element_witness(&dory.vmv_message.d2, &mut dory_idx, &var_alloc, &mut witness_map);
+        extract_dory_element_witness(&dory.vmv_message.e1, &mut dory_idx, &var_alloc, &mut witness_map);
+
+        for r in 0..dory.first_messages.len() {
+            let first = &dory.first_messages[r];
+            extract_dory_element_witness(&first.d1_left, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&first.d1_right, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&first.d2_left, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&first.d2_right, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&first.e1_beta, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&first.e2_beta, &mut dory_idx, &var_alloc, &mut witness_map);
+
+            let second = &dory.second_messages[r];
+            extract_dory_element_witness(&second.c_plus, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&second.c_minus, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&second.e1_plus, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&second.e1_minus, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&second.e2_plus, &mut dory_idx, &var_alloc, &mut witness_map);
+            extract_dory_element_witness(&second.e2_minus, &mut dory_idx, &var_alloc, &mut witness_map);
+        }
+        // NO final_message (not in replay ops for verify_recursive)
+        println!("  Dory witness values added: {}", dory_idx - dory_var_start as usize);
     }
 
     let witness_json = serde_json::to_string_pretty(&witness_map).expect("Failed to serialize witness");

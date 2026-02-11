@@ -359,6 +359,10 @@ pub trait OpeningAccumulator<F: JoltField> {
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
         unimplemented!("get_trusted_advice_opening only available for verifier accumulators")
     }
+
+    /// Pre-populate the accumulator with opening claims from a proof.
+    /// Default implementation is a no-op.
+    fn populate_from_openings(&mut self, _openings: &Openings<F>) {}
 }
 
 /// State for Dory batch opening (Stage 8).

@@ -6,7 +6,7 @@
 //! Supports Common Subexpression Elimination (CSE) to reduce circuit size
 //! by hoisting repeated subexpressions into named variables.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use zklean_extractor::mle_ast::{get_node, Atom, Edge, MleAst, Node};
 
 /// Format a scalar value ([u64; 4]) for Gnark code generation.
@@ -48,6 +48,16 @@ pub struct MemoizedCodeGen {
     var_names: HashMap<u16, String>,
     /// Optional constraint index for per-constraint CSE naming (None = global CSE)
     constraint_idx: Option<usize>,
+    /// Node IDs that produce Fq (emulated) values (FqMul/FqAdd/FqSub outputs)
+    fq_node_ids: HashSet<usize>,
+    /// Var indices that are Fq fields (referenced from Fq nodes as proof data)
+    fq_vars: BTreeSet<u16>,
+    /// Native Fr CSE var names that have been bridged to Fq (native_name → fq_name)
+    bridged_to_fq: HashMap<String, String>,
+    /// Fq expressions that have been bridged back to native Fr (fq_name → native_name)
+    bridged_fq_to_native: HashMap<String, String>,
+    /// Whether any Fq nodes were encountered in this codegen context
+    pub has_fq: bool,
 }
 
 impl MemoizedCodeGen {
@@ -60,6 +70,11 @@ impl MemoizedCodeGen {
             vars: BTreeSet::new(),
             var_names: HashMap::new(),
             constraint_idx: None,
+            fq_node_ids: HashSet::new(),
+            fq_vars: BTreeSet::new(),
+            bridged_to_fq: HashMap::new(),
+            bridged_fq_to_native: HashMap::new(),
+            has_fq: false,
         }
     }
 
@@ -73,6 +88,11 @@ impl MemoizedCodeGen {
             vars: BTreeSet::new(),
             var_names,
             constraint_idx: None,
+            fq_node_ids: HashSet::new(),
+            fq_vars: BTreeSet::new(),
+            bridged_to_fq: HashMap::new(),
+            bridged_fq_to_native: HashMap::new(),
+            has_fq: false,
         }
     }
 
@@ -87,6 +107,11 @@ impl MemoizedCodeGen {
             vars: BTreeSet::new(),
             var_names,
             constraint_idx: Some(constraint_idx),
+            fq_node_ids: HashSet::new(),
+            fq_vars: BTreeSet::new(),
+            bridged_to_fq: HashMap::new(),
+            bridged_fq_to_native: HashMap::new(),
+            has_fq: false,
         }
     }
 
@@ -101,6 +126,11 @@ impl MemoizedCodeGen {
     /// Get collected input variables
     pub fn vars(&self) -> &BTreeSet<u16> {
         &self.vars
+    }
+
+    /// Get collected Fq (emulated) variable indices
+    pub fn fq_vars(&self) -> &BTreeSet<u16> {
+        &self.fq_vars
     }
 
     /// Get all CSE bindings as Go code
@@ -131,7 +161,8 @@ impl MemoizedCodeGen {
                             stack.push(id);
                         }
                     }
-                    Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2) => {
+                    Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2)
+                    | Node::FqMul(e1, e2) | Node::FqAdd(e1, e2) | Node::FqSub(e1, e2) => {
                         if let Edge::NodeRef(id) = e1 {
                             stack.push(id);
                         }
@@ -214,7 +245,8 @@ impl MemoizedCodeGen {
                         }
                     }
                 }
-                Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2) => {
+                Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2)
+                | Node::FqMul(e1, e2) | Node::FqAdd(e1, e2) | Node::FqSub(e1, e2) => {
                     if let Edge::NodeRef(id) = e2 {
                         if !visited.contains(&id) {
                             stack.push((id, false));
@@ -318,6 +350,27 @@ impl MemoizedCodeGen {
                     let i = self.edge_to_gnark_iterative(input);
                     format!("poseidon.AppendU64Transform(api, {})", i)
                 }
+                Node::FqMul(left, right) => {
+                    self.fq_node_ids.insert(node_id);
+                    self.has_fq = true;
+                    let l = self.edge_to_gnark_fq(left);
+                    let r = self.edge_to_gnark_fq(right);
+                    format!("fqField.Mul({}, {})", l, r)
+                }
+                Node::FqAdd(left, right) => {
+                    self.fq_node_ids.insert(node_id);
+                    self.has_fq = true;
+                    let l = self.edge_to_gnark_fq(left);
+                    let r = self.edge_to_gnark_fq(right);
+                    format!("fqField.Add({}, {})", l, r)
+                }
+                Node::FqSub(left, right) => {
+                    self.fq_node_ids.insert(node_id);
+                    self.has_fq = true;
+                    let l = self.edge_to_gnark_fq(left);
+                    let r = self.edge_to_gnark_fq(right);
+                    format!("fqField.Sub({}, {})", l, r)
+                }
             };
 
             // Hoist to CSE variable if referenced more than once
@@ -347,11 +400,22 @@ impl MemoizedCodeGen {
         }
     }
 
-    /// Non-recursive edge_to_gnark that looks up already-generated expressions
+    /// Non-recursive edge_to_gnark that looks up already-generated expressions.
+    /// If a child is an Fq node, it's automatically bridged back to native Fr
+    /// via fqToNative() so it can be consumed by native operations.
     fn edge_to_gnark_iterative(&mut self, edge: Edge) -> String {
         match edge {
             Edge::Atom(atom) => self.atom_to_gnark(atom),
             Edge::NodeRef(node_id) => {
+                // If child is Fq, bridge it back to native Fr
+                if self.fq_node_ids.contains(&node_id) {
+                    let fq_expr = if let Some(expr) = self.generated.get(&node_id).cloned() {
+                        expr
+                    } else {
+                        panic!("Fq node {} not in generated", node_id)
+                    };
+                    return self.bridge_fq_to_native(&fq_expr);
+                }
                 // Child should already be generated (we're in post-order)
                 if let Some(expr) = self.generated.get(&node_id) {
                     expr.clone()
@@ -366,6 +430,115 @@ impl MemoizedCodeGen {
                 }
             }
         }
+    }
+
+    /// Generate an Fq (emulated) argument for use in fqField.Mul/Add/Sub calls.
+    /// Handles bridging native Fr values to Fq and wrapping constants/vars.
+    fn edge_to_gnark_fq(&mut self, edge: Edge) -> String {
+        match edge {
+            Edge::Atom(Atom::Scalar(v)) => {
+                // Constant → emulated element
+                format!("fqField.NewElement({})", format_scalar_for_gnark(v))
+            }
+            Edge::Atom(Atom::Var(idx)) => {
+                // Proof data variable — stored as native frontend.Variable,
+                // bridge to Fq on demand (same var may also be used in native Poseidon)
+                self.vars.insert(idx);
+                self.fq_vars.insert(idx);
+                let name = self.var_names.get(&idx)
+                    .map(|n| sanitize_go_name(n))
+                    .unwrap_or_else(|| format!("X_{}", idx));
+                let native_ref = format!("circuit.{}", name);
+                self.bridge_native_to_fq(&native_ref)
+            }
+            Edge::Atom(Atom::NamedVar(idx)) => {
+                // CSE var from mle_ast level — treat as native Fr, bridge
+                let cse_name = match self.constraint_idx {
+                    Some(ci) => format!("cse_{}_{}", ci, idx),
+                    None => format!("cse_{}", idx),
+                };
+                self.bridge_native_to_fq(&cse_name)
+            }
+            Edge::NodeRef(node_id) => {
+                if self.fq_node_ids.contains(&node_id) {
+                    // Already Fq — use directly
+                    if let Some(expr) = self.generated.get(&node_id).cloned() {
+                        expr
+                    } else {
+                        let node = get_node(node_id);
+                        if let Node::Atom(atom) = node {
+                            self.edge_to_gnark_fq(Edge::Atom(atom))
+                        } else {
+                            panic!("Fq node {} not in generated", node_id)
+                        }
+                    }
+                } else {
+                    // Native Fr value — need bridge
+                    let native_expr = if let Some(expr) = self.generated.get(&node_id).cloned() {
+                        expr
+                    } else {
+                        let node = get_node(node_id);
+                        if let Node::Atom(atom) = node {
+                            return self.edge_to_gnark_fq(Edge::Atom(atom));
+                        } else {
+                            panic!("Native node {} not in generated", node_id)
+                        }
+                    };
+                    self.bridge_native_to_fq(&native_expr)
+                }
+            }
+        }
+    }
+
+    /// Bridge a native Fr expression to Fq by emitting a fqField.FromBits conversion.
+    /// Returns the Fq variable name. Caches bridges to avoid duplicate conversions.
+    /// If native_expr is an inline expression (contains parentheses), it's first
+    /// hoisted to a CSE temporary so the bridge produces valid Go identifiers.
+    fn bridge_native_to_fq(&mut self, native_expr: &str) -> String {
+        if let Some(fq_name) = self.bridged_to_fq.get(native_expr) {
+            return fq_name.clone();
+        }
+        // If the expression is inline (not a simple identifier), hoist it first
+        let var_name = if native_expr.contains('(') || native_expr.contains('.') {
+            let temp_name = self.make_cse_name();
+            self.cse_counter += 1;
+            self.bindings.push(format!("\t{} := {}\n", temp_name, native_expr));
+            temp_name
+        } else {
+            native_expr.to_string()
+        };
+        let fq_name = format!("{}_fq", var_name);
+        self.bindings.push(format!(
+            "\t{} := fqField.FromBits(api.ToBinary({}, 254)...)\n",
+            fq_name, var_name
+        ));
+        self.bridged_to_fq.insert(native_expr.to_string(), fq_name.clone());
+        fq_name
+    }
+
+    /// Bridge an Fq (emulated) expression back to native Fr via fqToNative().
+    /// Caches bridges to avoid duplicate conversions.
+    /// If fq_expr is an inline expression, it's first hoisted to a CSE temp.
+    fn bridge_fq_to_native(&mut self, fq_expr: &str) -> String {
+        if let Some(native_name) = self.bridged_fq_to_native.get(fq_expr) {
+            return native_name.clone();
+        }
+        // Hoist inline expression if needed
+        let fq_var = if fq_expr.contains('(') || fq_expr.contains('.') || fq_expr.contains('[') {
+            let temp = self.make_cse_name();
+            self.cse_counter += 1;
+            self.bindings.push(format!("\t{} := {}\n", temp, fq_expr));
+            temp
+        } else {
+            fq_expr.to_string()
+        };
+        let native_name = format!("{}_native", fq_var);
+        self.bindings.push(format!(
+            "\t{} := fqToNative(api, fqField, {})\n",
+            native_name, fq_var
+        ));
+        self.bridged_fq_to_native.insert(fq_expr.to_string(), native_name.clone());
+        native_name
     }
 }
 
@@ -676,7 +849,10 @@ pub fn generate_stages_circuit(
     // from different assertions get incorrectly merged.
     let mut all_bindings_code = String::new();
     let mut assertion_exprs: Vec<String> = Vec::new();
+    let mut assertion_is_fq: Vec<bool> = Vec::new();
     let mut all_vars: BTreeSet<u16> = BTreeSet::new();
+    let mut all_fq_vars: BTreeSet<u16> = BTreeSet::new();
+    let mut any_fq = false;
 
     for (assertion_idx, assertion) in assertions.iter().enumerate() {
         // Create a fresh codegen context for this assertion with per-assertion CSE naming
@@ -691,9 +867,14 @@ pub fn generate_stages_circuit(
         // Generate expression for this assertion
         let expr = codegen.generate_expr(assertion.root());
         assertion_exprs.push(expr);
+        assertion_is_fq.push(codegen.has_fq);
+        if codegen.has_fq {
+            any_fq = true;
+        }
 
         // Collect vars used in this assertion
         all_vars.extend(codegen.vars().iter());
+        all_fq_vars.extend(codegen.fq_vars().iter());
 
         // Collect bindings for this assertion (already have prefixed names from codegen)
         let constraint_bindings = codegen.bindings_code();
@@ -712,6 +893,9 @@ pub fn generate_stages_circuit(
     output.push_str("package jolt_verifier\n\n");
     output.push_str("import (\n");
     output.push_str("\t\"github.com/consensys/gnark/frontend\"\n");
+    if any_fq {
+        output.push_str("\t\"github.com/consensys/gnark/std/math/emulated\"\n");
+    }
     if bindings_code.contains("poseidon.Hash")
         || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash"))
     {
@@ -725,6 +909,8 @@ pub fn generate_stages_circuit(
     output.push_str(&format!("type {} struct {{\n", circuit_name));
 
     // Add input variables - use sanitized names
+    // All vars are native frontend.Variable (even Fq proof data).
+    // Fq vars are bridged to emulated.Element on demand in the circuit body.
     for var_idx in vars.iter() {
         let name = var_names
             .get(var_idx)
@@ -744,6 +930,15 @@ pub fn generate_stages_circuit(
         circuit_name
     ));
 
+    // Initialize emulated field if needed
+    if any_fq {
+        output.push_str("\t// Emulated Fq field for recursion stages (BN254 base field arithmetic)\n");
+        output.push_str("\tfqField, err := emulated.NewField[emulated.BN254Fp](api)\n");
+        output.push_str("\tif err != nil {\n");
+        output.push_str("\t\treturn err\n");
+        output.push_str("\t}\n\n");
+    }
+
     // CSE bindings
     if !bindings_code.is_empty() {
         output.push_str("\t// Memoized subexpressions (CSE)\n");
@@ -753,9 +948,14 @@ pub fn generate_stages_circuit(
 
     // Generate assertions - each expression must equal zero
     output.push_str("\t// Verification assertions (each must equal 0)\n");
-    for (i, expr) in assertion_exprs.iter().enumerate() {
+    for (i, (expr, is_fq)) in assertion_exprs.iter().zip(assertion_is_fq.iter()).enumerate() {
         output.push_str(&format!("\ta{} := {}\n", i, expr));
-        output.push_str(&format!("\tapi.AssertIsEqual(a{}, 0)\n", i));
+        if *is_fq {
+            // Fq assertion: use emulated field comparison
+            output.push_str(&format!("\tfqField.AssertIsEqual(a{}, fqField.Zero())\n", i));
+        } else {
+            output.push_str(&format!("\tapi.AssertIsEqual(a{}, 0)\n", i));
+        }
         if (i + 1) % 100 == 0 {
             output.push_str(&format!("\t// ... assertion {} of {}\n", i + 1, assertion_exprs.len()));
         }

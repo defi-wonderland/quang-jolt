@@ -93,6 +93,7 @@ thread_local! {
     /// Flag to enable constraint accumulation mode.
     /// When true, PartialEq comparisons register constraints instead of comparing NodeIds.
     static CONSTRAINT_MODE: RefCell<bool> = RefCell::new(false);
+
 }
 
 /// Enable constraint accumulation mode.
@@ -124,6 +125,18 @@ pub fn take_constraints() -> Vec<MleAst> {
 /// Get the number of accumulated constraints.
 pub fn num_constraints() -> usize {
     SYMBOLIC_CONSTRAINTS.with(|cell| cell.borrow().len())
+}
+
+/// Re-export: enable Fq arithmetic mode (for recursion stages).
+/// Delegates to jolt_core::zkvm::fq_mode which owns the thread-local,
+/// since jolt-core cannot depend on zklean-extractor.
+pub fn set_fq_mode(enabled: bool) {
+    jolt_core::zkvm::fq_mode::set_fq_mode(enabled);
+}
+
+/// Re-export: check if Fq arithmetic mode is enabled.
+pub fn is_fq_mode() -> bool {
+    jolt_core::zkvm::fq_mode::is_fq_mode()
 }
 
 /// Add a constraint that should equal zero.
@@ -276,6 +289,13 @@ pub enum Node {
     /// - u64 placed in bytes 24-31 of 32-byte array
     /// - Interpreted as LE gives value * 2^192
     MulTwoPow192(Edge),
+    /// Fq-field multiplication (emulated in Gnark circuit, mod Fq not Fr).
+    /// Created when FQ_MODE is enabled during recursion stage verification.
+    FqMul(Edge, Edge),
+    /// Fq-field addition (emulated in Gnark circuit).
+    FqAdd(Edge, Edge),
+    /// Fq-field subtraction (emulated in Gnark circuit).
+    FqSub(Edge, Edge),
 }
 
 /// An AST intended for representing an MLE computation (although it will actually work for any
@@ -469,7 +489,8 @@ fn is_node_constant(node_id: NodeId) -> bool {
         | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) => {
             is_edge_constant(e)
         }
-        Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2) => {
+        Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2)
+        | Node::FqMul(e1, e2) | Node::FqAdd(e1, e2) | Node::FqSub(e1, e2) => {
             is_edge_constant(e1) && is_edge_constant(e2)
         }
         Node::Poseidon(e1, e2, e3) => {
@@ -478,10 +499,18 @@ fn is_node_constant(node_id: NodeId) -> bool {
     }
 }
 
-/// BN254 scalar field modulus: 21888242871839275222246405745257275088548364400416034343698204186575808495617
+/// BN254 scalar field modulus (Fr): 21888242871839275222246405745257275088548364400416034343698204186575808495617
 const BN254_MODULUS: [u64; 4] = [
     0x43E1F593F0000001,
     0x2833E84879B97091,
+    0xB85045B68181585D,
+    0x30644E72E131A029,
+];
+
+/// BN254 base field modulus (Fq): 21888242871839275222246405745257275088696311157297823662689037894645226208583
+const BN254_FQ_MODULUS: [u64; 4] = [
+    0x3C208C16D87CFD47,
+    0x97816A916871CA8D,
     0xB85045B68181585D,
     0x30644E72E131A029,
 ];
@@ -549,6 +578,70 @@ fn scalar_mul_mod(a: Scalar, b: Scalar) -> Scalar {
     out
 }
 
+/// Add mod Fq (BN254 base field)
+fn scalar_add_mod_fq(a: Scalar, b: Scalar) -> Scalar {
+    scalar_add_mod_p(a, b, &BN254_FQ_MODULUS)
+}
+
+/// Subtract mod Fq (BN254 base field)
+fn scalar_sub_mod_fq(a: Scalar, b: Scalar) -> Scalar {
+    let neg_b = scalar_neg_mod_p(b, &BN254_FQ_MODULUS);
+    scalar_add_mod_p(a, neg_b, &BN254_FQ_MODULUS)
+}
+
+/// Multiply mod Fq (BN254 base field)
+fn scalar_mul_mod_fq(a: Scalar, b: Scalar) -> Scalar {
+    scalar_mul_mod_p(a, b, &BN254_FQ_MODULUS)
+}
+
+/// Add mod arbitrary modulus
+fn scalar_add_mod_p(a: Scalar, b: Scalar, modulus: &Scalar) -> Scalar {
+    let mut result = [0u64; 4];
+    let mut carry = 0u128;
+    for i in 0..4 {
+        let sum = a[i] as u128 + b[i] as u128 + carry;
+        result[i] = sum as u64;
+        carry = sum >> 64;
+    }
+    if carry > 0 || scalar_ge(&result, modulus) {
+        scalar_sub_no_borrow(&result, modulus)
+    } else {
+        result
+    }
+}
+
+/// Negate mod arbitrary modulus
+fn scalar_neg_mod_p(a: Scalar, modulus: &Scalar) -> Scalar {
+    if a == SCALAR_ZERO {
+        return SCALAR_ZERO;
+    }
+    scalar_sub_no_borrow(modulus, &a)
+}
+
+/// Multiply mod arbitrary modulus
+fn scalar_mul_mod_p(a: Scalar, b: Scalar, modulus: &Scalar) -> Scalar {
+    use num_bigint::BigUint;
+    let a_big = BigUint::from_slice(&[a[0] as u32, (a[0] >> 32) as u32,
+                                       a[1] as u32, (a[1] >> 32) as u32,
+                                       a[2] as u32, (a[2] >> 32) as u32,
+                                       a[3] as u32, (a[3] >> 32) as u32]);
+    let b_big = BigUint::from_slice(&[b[0] as u32, (b[0] >> 32) as u32,
+                                       b[1] as u32, (b[1] >> 32) as u32,
+                                       b[2] as u32, (b[2] >> 32) as u32,
+                                       b[3] as u32, (b[3] >> 32) as u32]);
+    let p_big = BigUint::from_slice(&[modulus[0] as u32, (modulus[0] >> 32) as u32,
+                                       modulus[1] as u32, (modulus[1] >> 32) as u32,
+                                       modulus[2] as u32, (modulus[2] >> 32) as u32,
+                                       modulus[3] as u32, (modulus[3] >> 32) as u32]);
+    let result = (a_big * b_big) % p_big;
+    let digits = result.to_u64_digits();
+    let mut out = [0u64; 4];
+    for (i, &d) in digits.iter().take(4).enumerate() {
+        out[i] = d;
+    }
+    out
+}
+
 /// Compare two 256-bit numbers: returns true if a >= b
 fn scalar_ge(a: &Scalar, b: &Scalar) -> bool {
     for i in (0..4).rev() {
@@ -605,8 +698,16 @@ fn evaluate_constant_node(node_id: NodeId) -> Scalar {
         Node::Mul(e1, e2) => {
             scalar_mul_mod(evaluate_constant_edge(e1), evaluate_constant_edge(e2))
         }
+        Node::FqAdd(e1, e2) => {
+            scalar_add_mod_fq(evaluate_constant_edge(e1), evaluate_constant_edge(e2))
+        }
+        Node::FqSub(e1, e2) => {
+            scalar_sub_mod_fq(evaluate_constant_edge(e1), evaluate_constant_edge(e2))
+        }
+        Node::FqMul(e1, e2) => {
+            scalar_mul_mod_fq(evaluate_constant_edge(e1), evaluate_constant_edge(e2))
+        }
         Node::Inv(_) | Node::Div(_, _) => {
-            // Modular inverse is complex - for now, panic
             panic!("Modular inverse not implemented for constant evaluation")
         }
         Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_)
@@ -630,9 +731,9 @@ fn evaluate_node<F: JoltField>(node: NodeId, env: &Environment<F>) -> F {
         Node::Atom(atom) => atom.evaluate(env),
         Node::Neg(edge) => -evaluate_edge(edge, env),
         Node::Inv(edge) => F::one() / evaluate_edge(edge, env),
-        Node::Add(e1, e2) => evaluate_edge(e1, env) + evaluate_edge(e2, env),
-        Node::Mul(e1, e2) => evaluate_edge(e1, env) * evaluate_edge(e2, env),
-        Node::Sub(e1, e2) => evaluate_edge(e1, env) - evaluate_edge(e2, env),
+        Node::Add(e1, e2) | Node::FqAdd(e1, e2) => evaluate_edge(e1, env) + evaluate_edge(e2, env),
+        Node::Mul(e1, e2) | Node::FqMul(e1, e2) => evaluate_edge(e1, env) * evaluate_edge(e2, env),
+        Node::Sub(e1, e2) | Node::FqSub(e1, e2) => evaluate_edge(e1, env) - evaluate_edge(e2, env),
         Node::Div(e1, e2) => evaluate_edge(e1, env) / evaluate_edge(e2, env),
         Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_) | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) => {
             // Hash/transform nodes are for circuit generation only, not field evaluation
@@ -703,9 +804,9 @@ fn node_depth(node: Node) -> usize {
         Node::Truncate128Reverse(e) => 1 + edge_depth(e),
         Node::Truncate128(e) => 1 + edge_depth(e),
         Node::MulTwoPow192(e) => 1 + edge_depth(e),
-        Node::Add(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
-        Node::Mul(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
-        Node::Sub(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
+        Node::Add(e1, e2) | Node::FqAdd(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
+        Node::Mul(e1, e2) | Node::FqMul(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
+        Node::Sub(e1, e2) | Node::FqSub(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Div(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Poseidon(e1, e2, e3) => 1 + max(edge_depth(e1), max(edge_depth(e2), edge_depth(e3))),
     }
@@ -819,6 +920,21 @@ pub fn common_subexpression_elimination(node: Node) -> (Vec<Node>, Node) {
             Node::Truncate128(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::Truncate128(cse_e))
+            }
+            Node::FqMul(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqMul(cse_e1, cse_e2))
+            }
+            Node::FqAdd(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqAdd(cse_e1, cse_e2))
+            }
+            Node::FqSub(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqSub(cse_e1, cse_e2))
             }
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
@@ -937,6 +1053,21 @@ pub fn common_subexpression_elimination_incremental(
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::Truncate128(cse_e))
             }
+            Node::FqMul(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqMul(cse_e1, cse_e2))
+            }
+            Node::FqAdd(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqAdd(cse_e1, cse_e2))
+            }
+            Node::FqSub(e1, e2) => {
+                let cse_e1 = aux_edge(bindings, nodes, e1);
+                let cse_e2 = aux_edge(bindings, nodes, e2);
+                register(bindings, nodes, Node::FqSub(cse_e1, cse_e2))
+            }
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::MulTwoPow192(cse_e))
@@ -1038,6 +1169,27 @@ fn fmt_node(
         Node::MulTwoPow192(edge) => {
             write!(f, "mul_two_pow_192(")?;
             fmt_edge(f, fmt_data, edge, false)?;
+            write!(f, ")")
+        }
+        Node::FqMul(e1, e2) => {
+            write!(f, "fq_mul(")?;
+            fmt_edge(f, fmt_data, e1, false)?;
+            write!(f, ", ")?;
+            fmt_edge(f, fmt_data, e2, false)?;
+            write!(f, ")")
+        }
+        Node::FqAdd(e1, e2) => {
+            write!(f, "fq_add(")?;
+            fmt_edge(f, fmt_data, e1, false)?;
+            write!(f, ", ")?;
+            fmt_edge(f, fmt_data, e2, false)?;
+            write!(f, ")")
+        }
+        Node::FqSub(e1, e2) => {
+            write!(f, "fq_sub(")?;
+            fmt_edge(f, fmt_data, e1, false)?;
+            write!(f, ", ")?;
+            fmt_edge(f, fmt_data, e2, false)?;
             write!(f, ")")
         }
     }
@@ -1212,7 +1364,7 @@ impl std::ops::Add<&Self> for MleAst {
         if rhs.is_zero() {
             return self;
         }
-        self.binop(Node::Add, rhs);
+        self.binop(if is_fq_mode() { Node::FqAdd } else { Node::Add }, rhs);
         self
     }
 }
@@ -1226,11 +1378,11 @@ impl std::ops::Sub<&Self> for MleAst {
         if rhs.is_zero() {
             return self;
         }
-        // Optimization: 0 - x = -x
-        if self.is_zero() {
+        // Optimization: 0 - x = -x (but NOT in Fq mode — native Neg is wrong for Fq)
+        if self.is_zero() && !is_fq_mode() {
             return -rhs.clone();
         }
-        self.binop(Node::Sub, rhs);
+        self.binop(if is_fq_mode() { Node::FqSub } else { Node::Sub }, rhs);
         self
     }
 }
@@ -1245,7 +1397,7 @@ impl std::ops::Mul<&Self> for MleAst {
         if self.is_zero() || rhs.is_zero() {
             return Self::zero();
         }
-        self.binop(Node::Mul, rhs);
+        self.binop(if is_fq_mode() { Node::FqMul } else { Node::Mul }, rhs);
         self
     }
 }
@@ -1272,7 +1424,7 @@ impl std::ops::AddAssign for MleAst {
             *self = rhs;
             return;
         }
-        self.binop(Node::Add, &rhs);
+        self.binop(if is_fq_mode() { Node::FqAdd } else { Node::Add }, &rhs);
     }
 }
 
@@ -1287,7 +1439,7 @@ impl<'a> std::ops::AddAssign<&'a Self> for MleAst {
             *self = rhs.clone();
             return;
         }
-        self.binop(Node::Add, rhs);
+        self.binop(if is_fq_mode() { Node::FqAdd } else { Node::Add }, rhs);
     }
 }
 
@@ -1297,12 +1449,12 @@ impl std::ops::SubAssign for MleAst {
         if rhs.is_zero() {
             return;
         }
-        // Optimization: 0 -= x => self = -x
-        if self.is_zero() {
+        // Optimization: 0 -= x => self = -x (but NOT in Fq mode)
+        if self.is_zero() && !is_fq_mode() {
             *self = -rhs;
             return;
         }
-        self.binop(Node::Sub, &rhs);
+        self.binop(if is_fq_mode() { Node::FqSub } else { Node::Sub }, &rhs);
     }
 }
 
@@ -1312,12 +1464,12 @@ impl<'a> std::ops::SubAssign<&'a Self> for MleAst {
         if rhs.is_zero() {
             return;
         }
-        // Optimization: 0 -= x => self = -x
-        if self.is_zero() {
+        // Optimization: 0 -= x => self = -x (but NOT in Fq mode)
+        if self.is_zero() && !is_fq_mode() {
             *self = -rhs.clone();
             return;
         }
-        self.binop(Node::Sub, rhs);
+        self.binop(if is_fq_mode() { Node::FqSub } else { Node::Sub }, rhs);
     }
 }
 
@@ -1328,7 +1480,7 @@ impl std::ops::MulAssign for MleAst {
             *self = Self::zero();
             return;
         }
-        self.binop(Node::Mul, &rhs);
+        self.binop(if is_fq_mode() { Node::FqMul } else { Node::Mul }, &rhs);
     }
 }
 
@@ -1339,7 +1491,7 @@ impl<'a> std::ops::MulAssign<&'a Self> for MleAst {
             *self = Self::zero();
             return;
         }
-        self.binop(Node::Mul, rhs);
+        self.binop(if is_fq_mode() { Node::FqMul } else { Node::Mul }, rhs);
     }
 }
 

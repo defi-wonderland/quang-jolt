@@ -19,7 +19,7 @@
 use ark_std::Zero;
 use zklean_extractor::mle_ast::MleAst;
 use jolt_core::poly::opening_proof::{
-    OpeningAccumulator, OpeningId, OpeningPoint, SumcheckId, BIG_ENDIAN,
+    OpeningAccumulator, OpeningId, OpeningPoint, Openings, SumcheckId, BIG_ENDIAN,
 };
 use jolt_core::transcripts::Transcript;
 use jolt_core::zkvm::claim_reductions::AdviceKind;
@@ -335,6 +335,12 @@ impl OpeningAccumulator<MleAst> for MleOpeningAccumulator {
                 // This can happen for sparse polynomials that aren't pre-populated
                 self.openings.insert(key, (opening_point.clone(), MleAst::zero()));
             }
+        }
+    }
+
+    fn populate_from_openings(&mut self, openings: &Openings<MleAst>) {
+        for (key, (point, claim)) in openings {
+            self.openings.insert(*key, (point.r.clone(), claim.clone()));
         }
     }
 }

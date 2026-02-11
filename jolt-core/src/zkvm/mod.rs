@@ -26,6 +26,7 @@ use verifier::JoltVerifier;
 pub mod bytecode;
 pub mod claim_reductions;
 pub mod dory_replay;
+pub mod fq_mode;
 pub mod config;
 pub mod instruction;
 pub mod instruction_lookups;

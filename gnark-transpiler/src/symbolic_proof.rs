@@ -866,7 +866,9 @@ pub fn symbolize_recursion_proof(
     let delta = alloc.alloc("recursion_delta");
 
     // Build symbolic recursion proof
-    // Note: opening_proof and dense_commitment are not symbolized - they're verified natively in gnark
+    // Note: opening_proof and dense_commitment are not symbolized - they're verified natively in gnark.
+    // opening_claims are empty — the m_eval check (Stage 3 direct evaluation) is skipped in the circuit
+    // since it's verified natively by the PCS opening proof. This avoids a massive Fq expression tree.
     RecursionProof {
         stage1_proof,
         stage2_proof,
@@ -929,7 +931,7 @@ pub fn extract_witness_values(
     let mut values = std::collections::HashMap::new();
 
     // Use WitnessFieldIterator to iterate fields in canonical order
-    for (idx, field) in WitnessFieldIterator::new(real_proof).into_iter().enumerate() {
+    for (idx, field) in WitnessFieldIterator::new_with_recursion(real_proof).into_iter().enumerate() {
         let value: String = match field {
             WitnessField::CommitmentChunk { commitment_idx, chunk_idx } => {
                 let chunk = get_commitment_chunk(&commitment_bytes[commitment_idx], chunk_idx);

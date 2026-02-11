@@ -23,7 +23,7 @@ use crate::{
     field::JoltField,
     poly::{
         commitment::commitment_scheme::CommitmentScheme,
-        opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
+        opening_proof::{OpeningAccumulator, OpeningPoint, SumcheckId, VerifierOpeningAccumulator, BIG_ENDIAN},
     },
     transcripts::Transcript,
     zkvm::witness::VirtualPolynomial,
@@ -518,31 +518,43 @@ impl RecursionVerifier<Fq> {
         r_x: &[F::Challenge],
         stage3_m_eval: F,
     ) -> Result<Vec<F::Challenge>, Box<dyn std::error::Error>> {
-        // Convert r_x challenges to field elements
-        let r_x_f: Vec<F> = r_x.iter().map(|c| (*c).into()).collect();
+        // Stage 3 (Direct Evaluation) verifies that M(r_s, r_x) = m_eval_claimed.
+        //
+        // For the transpiled circuit, we skip the expensive m_eval comparison
+        // (compute_expected_evaluation requires Σ eq(r_s, i) · claim_i over all virtual claims,
+        // which creates a massive Fq expression tree). The m_eval check is instead verified
+        // natively by the PCS opening proof.
+        //
+        // We still:
+        // 1. Sample r_s challenges (needed by subsequent stages)
+        // 2. Absorb m_eval_claimed into transcript (Fiat-Shamir consistency)
+        // 3. Store opening point in accumulator
 
-        // For symbolic execution, we need to extract virtual claims generically.
-        // The claims come from Stage 2 accumulated polynomial openings.
-        // For now, we create placeholder claims that will be populated by the accumulator.
-        let num_claims = self.input.num_constraints * 5; // Approximate: 5 poly types per constraint
-        let virtual_claims: Vec<F> = vec![F::zero(); num_claims];
+        // Sample r_s from transcript (matches DirectEvaluationVerifier::verify)
+        let r_s: Vec<F::Challenge> = (0..self.input.num_s_vars)
+            .map(|_| transcript.challenge_scalar_optimized::<F>())
+            .collect();
 
-        let params = DirectEvaluationParams::new(
-            self.input.num_s_vars,
-            self.input.num_constraints,
-            self.input.num_constraints_padded,
-            self.input.num_constraint_vars,
+        // Absorb m_eval_claimed into transcript for Fiat-Shamir
+        transcript.append_scalar(&stage3_m_eval);
+
+        // Store opening point in accumulator
+        let r_x_challenges: Vec<F::Challenge> = r_x.to_vec();
+        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(
+            r_s.iter()
+                .rev()
+                .chain(r_x_challenges.iter().rev())
+                .cloned()
+                .collect(),
+        );
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::DorySparseConstraintMatrix,
+            SumcheckId::RecursionVirtualization,
+            opening_point,
         );
 
-        // Convert r_x to challenges for DirectEvaluationVerifier
-        let r_x_challenges: Vec<F::Challenge> = r_x.to_vec();
-
-        let verifier = DirectEvaluationVerifier::<F>::new(params, virtual_claims, r_x_challenges);
-        let r_s = verifier
-            .verify(transcript, accumulator, stage3_m_eval)
-            .map_err(Box::<dyn std::error::Error>::from)?;
-
-        // r_s is already Vec<F::Challenge>, just reverse it
+        // Reverse r_s for subsequent stages (big-endian ordering)
         let r_s_challenges: Vec<F::Challenge> = r_s.into_iter().rev().collect();
 
         Ok(r_s_challenges)

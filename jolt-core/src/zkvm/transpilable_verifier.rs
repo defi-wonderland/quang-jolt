@@ -827,6 +827,10 @@ impl<
         let recursion_verifier = RecursionVerifier::<Fq>::new(verifier_input);
 
         // === 6. RECURSION SUMCHECKS ===
+        // Enable Fq mode: recursion stages operate in BN254 base field (Fq), not scalar field (Fr).
+        // This causes MleAst to emit FqMul/FqAdd/FqSub nodes instead of Mul/Add/Sub,
+        // so codegen produces emulated field arithmetic in the Gnark circuit.
+        crate::zkvm::fq_mode::set_fq_mode(true);
         self.transcript.debug_state("before_recursion_sumchecks");
         let mut recursion_accumulator = A::default();
         recursion_verifier
@@ -840,6 +844,7 @@ impl<
                 &mut recursion_accumulator,
             )
             .map_err(|e| anyhow::anyhow!("Recursion sumchecks failed: {e:?}"))?;
+        crate::zkvm::fq_mode::set_fq_mode(false);
 
         Ok(())
     }

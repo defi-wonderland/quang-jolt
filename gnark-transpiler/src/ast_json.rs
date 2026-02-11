@@ -159,6 +159,20 @@ impl From<Node> for NodeJson {
             Node::MulTwoPow192(input) => NodeJson::MulTwoPow192 {
                 input: input.into(),
             },
+            // Fq variants map to same JSON structure as Fr equivalents
+            // (JSON is for debugging only, codegen handles the Fq distinction)
+            Node::FqMul(left, right) => NodeJson::Mul {
+                left: left.into(),
+                right: right.into(),
+            },
+            Node::FqAdd(left, right) => NodeJson::Add {
+                left: left.into(),
+                right: right.into(),
+            },
+            Node::FqSub(left, right) => NodeJson::Sub {
+                left: left.into(),
+                right: right.into(),
+            },
         }
     }
 }
