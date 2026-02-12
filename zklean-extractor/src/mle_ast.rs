@@ -270,10 +270,6 @@ pub enum Node {
     /// Matches jolt-core PoseidonTranscript which uses width-3 Poseidon.
     /// Uses Fr (circom) parameters.
     Poseidon(Edge, Edge, Edge),
-    /// Poseidon hash with 3 inputs (state, n_rounds, data) in Fq field.
-    /// Uses Fq (poseidon-paramgen) parameters: width=4, different MDS matrix and round constants.
-    /// Created when is_fq_mode() is true during recursion stage verification.
-    PoseidonFq(Edge, Edge, Edge),
     /// Keccak256 hash of a single field element
     Keccak256(Edge),
     /// Byte-reverse a field element.
@@ -303,11 +299,6 @@ pub enum Node {
     FqSub(Edge, Edge),
     /// Fq-field negation (emulated in Gnark circuit).
     FqNeg(Edge),
-    /// Fq-field challenge truncation (simple from_u128 semantics).
-    /// Used for challenge_scalar_optimized in Fq mode (produces Mont254BitChallenge).
-    /// Unlike Truncate128Reverse (which applies 125-bit mask + R^-1 for MontU128Challenge),
-    /// this uses standard from_u128: BigInt([low, high, 0, 0]) -> from_bigint().
-    FqTruncate128(Edge),
 }
 
 /// An AST intended for representing an MLE computation (although it will actually work for any
@@ -397,19 +388,6 @@ impl MleAst {
         }
     }
 
-    /// Poseidon Fq hash with 3 inputs (state, n_rounds, data).
-    /// Uses Fq-specific parameters (width=4, different MDS/round constants).
-    pub fn poseidon_fq(state: &Self, n_rounds: &Self, data: &Self) -> Self {
-        let state_edge = edge_for_root(state.root);
-        let rounds_edge = edge_for_root(n_rounds.root);
-        let data_edge = edge_for_root(data.root);
-        let root = insert_node(Node::PoseidonFq(state_edge, rounds_edge, data_edge));
-        Self {
-            root,
-            reg_name: state.reg_name.or(n_rounds.reg_name).or(data.reg_name),
-        }
-    }
-
     /// Keccak256 hash of a single field element.
     pub fn keccak256(input: &Self) -> Self {
         let edge = edge_for_root(input.root);
@@ -449,19 +427,6 @@ impl MleAst {
     pub fn truncate_128(input: &Self) -> Self {
         let edge = edge_for_root(input.root);
         let root = insert_node(Node::Truncate128(edge));
-        Self {
-            root,
-            reg_name: input.reg_name,
-        }
-    }
-
-    /// Fq-field challenge truncation (simple from_u128 semantics).
-    /// Used for challenge_scalar_optimized in Fq mode (produces Mont254BitChallenge).
-    /// Unlike truncate_128_reverse (for MontU128Challenge with 125-bit mask + R^-1),
-    /// this uses standard from_u128: take low 128 bits -> BigInt([low, high, 0, 0]) -> from_bigint.
-    pub fn fq_truncate_128(input: &Self) -> Self {
-        let edge = edge_for_root(input.root);
-        let root = insert_node(Node::FqTruncate128(edge));
         Self {
             root,
             reg_name: input.reg_name,
@@ -525,14 +490,14 @@ fn is_node_constant(node_id: NodeId) -> bool {
         Node::Atom(Atom::NamedVar(_)) => false,
         Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e)
         | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e)
-        | Node::FqNeg(e) | Node::FqTruncate128(e) => {
+        | Node::FqNeg(e) => {
             is_edge_constant(e)
         }
         Node::Add(e1, e2) | Node::Mul(e1, e2) | Node::Sub(e1, e2) | Node::Div(e1, e2)
         | Node::FqMul(e1, e2) | Node::FqAdd(e1, e2) | Node::FqSub(e1, e2) => {
             is_edge_constant(e1) && is_edge_constant(e2)
         }
-        Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => {
+        Node::Poseidon(e1, e2, e3) => {
             is_edge_constant(e1) && is_edge_constant(e2) && is_edge_constant(e3)
         }
     }
@@ -755,9 +720,8 @@ fn evaluate_constant_node(node_id: NodeId) -> Scalar {
         Node::Inv(_) | Node::Div(_, _) => {
             panic!("Modular inverse not implemented for constant evaluation")
         }
-        Node::Poseidon(_, _, _) | Node::PoseidonFq(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_)
-        | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_)
-        | Node::FqTruncate128(_) => {
+        Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_)
+        | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) => {
             panic!("Hash/transform operations cannot be evaluated as constants")
         }
     }
@@ -781,7 +745,7 @@ fn evaluate_node<F: JoltField>(node: NodeId, env: &Environment<F>) -> F {
         Node::Mul(e1, e2) | Node::FqMul(e1, e2) => evaluate_edge(e1, env) * evaluate_edge(e2, env),
         Node::Sub(e1, e2) | Node::FqSub(e1, e2) => evaluate_edge(e1, env) - evaluate_edge(e2, env),
         Node::Div(e1, e2) => evaluate_edge(e1, env) / evaluate_edge(e2, env),
-        Node::Poseidon(_, _, _) | Node::PoseidonFq(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_) | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) | Node::FqTruncate128(_) => {
+        Node::Poseidon(_, _, _) | Node::Keccak256(_) | Node::ByteReverse(_) | Node::Truncate128Reverse(_) | Node::Truncate128(_) | Node::MulTwoPow192(_) => {
             // Hash/transform nodes are for circuit generation only, not field evaluation
             unreachable!("Hash/transform nodes should not appear in zklean-extractor tests")
         }
@@ -850,12 +814,11 @@ fn node_depth(node: Node) -> usize {
         Node::Truncate128Reverse(e) => 1 + edge_depth(e),
         Node::Truncate128(e) => 1 + edge_depth(e),
         Node::MulTwoPow192(e) => 1 + edge_depth(e),
-        Node::FqTruncate128(e) => 1 + edge_depth(e),
         Node::Add(e1, e2) | Node::FqAdd(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Mul(e1, e2) | Node::FqMul(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Sub(e1, e2) | Node::FqSub(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
         Node::Div(e1, e2) => 1 + max(edge_depth(e1), edge_depth(e2)),
-        Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => 1 + max(edge_depth(e1), max(edge_depth(e2), edge_depth(e3))),
+        Node::Poseidon(e1, e2, e3) => 1 + max(edge_depth(e1), max(edge_depth(e2), edge_depth(e3))),
     }
 }
 
@@ -956,12 +919,6 @@ pub fn common_subexpression_elimination(node: Node) -> (Vec<Node>, Node) {
                 let cse_e3 = aux_edge(bindings, nodes, e3);
                 register(bindings, nodes, Node::Poseidon(cse_e1, cse_e2, cse_e3))
             }
-            Node::PoseidonFq(e1, e2, e3) => {
-                let cse_e1 = aux_edge(bindings, nodes, e1);
-                let cse_e2 = aux_edge(bindings, nodes, e2);
-                let cse_e3 = aux_edge(bindings, nodes, e3);
-                register(bindings, nodes, Node::PoseidonFq(cse_e1, cse_e2, cse_e3))
-            }
             Node::ByteReverse(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::ByteReverse(cse_e))
@@ -996,10 +953,6 @@ pub fn common_subexpression_elimination(node: Node) -> (Vec<Node>, Node) {
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::MulTwoPow192(cse_e))
-            }
-            Node::FqTruncate128(e) => {
-                let cse_e = aux_edge(bindings, nodes, e);
-                register(bindings, nodes, Node::FqTruncate128(cse_e))
             }
         }
     }
@@ -1102,12 +1055,6 @@ pub fn common_subexpression_elimination_incremental(
                 let cse_e3 = aux_edge(bindings, nodes, e3);
                 register(bindings, nodes, Node::Poseidon(cse_e1, cse_e2, cse_e3))
             }
-            Node::PoseidonFq(e1, e2, e3) => {
-                let cse_e1 = aux_edge(bindings, nodes, e1);
-                let cse_e2 = aux_edge(bindings, nodes, e2);
-                let cse_e3 = aux_edge(bindings, nodes, e3);
-                register(bindings, nodes, Node::PoseidonFq(cse_e1, cse_e2, cse_e3))
-            }
             Node::ByteReverse(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::ByteReverse(cse_e))
@@ -1142,10 +1089,6 @@ pub fn common_subexpression_elimination_incremental(
             Node::MulTwoPow192(e) => {
                 let cse_e = aux_edge(bindings, nodes, e);
                 register(bindings, nodes, Node::MulTwoPow192(cse_e))
-            }
-            Node::FqTruncate128(e) => {
-                let cse_e = aux_edge(bindings, nodes, e);
-                register(bindings, nodes, Node::FqTruncate128(cse_e))
             }
         }
     }
@@ -1226,15 +1169,6 @@ fn fmt_node(
             fmt_edge(f, fmt_data, e3, false)?;
             write!(f, ")")
         }
-        Node::PoseidonFq(e1, e2, e3) => {
-            write!(f, "poseidon_fq(")?;
-            fmt_edge(f, fmt_data, e1, false)?;
-            write!(f, ", ")?;
-            fmt_edge(f, fmt_data, e2, false)?;
-            write!(f, ", ")?;
-            fmt_edge(f, fmt_data, e3, false)?;
-            write!(f, ")")
-        }
         Node::ByteReverse(edge) => {
             write!(f, "byte_reverse(")?;
             fmt_edge(f, fmt_data, edge, false)?;
@@ -1278,11 +1212,6 @@ fn fmt_node(
         }
         Node::FqNeg(edge) => {
             write!(f, "fq_neg(")?;
-            fmt_edge(f, fmt_data, edge, false)?;
-            write!(f, ")")
-        }
-        Node::FqTruncate128(edge) => {
-            write!(f, "fq_truncate_128(")?;
             fmt_edge(f, fmt_data, edge, false)?;
             write!(f, ")")
         }

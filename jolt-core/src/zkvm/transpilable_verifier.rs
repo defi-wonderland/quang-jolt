@@ -830,11 +830,10 @@ impl<
         // === 6. RECURSION SUMCHECKS ===
         // Enable Fq mode: recursion stages operate in BN254 base field (Fq), not scalar field (Fr).
         // This causes MleAst to emit FqMul/FqAdd/FqSub nodes instead of Mul/Add/Sub,
-        // and PoseidonFq nodes instead of Poseidon, so codegen produces emulated field arithmetic
-        // and poseidon.HashFq() calls in the Gnark circuit.
+        // so codegen produces emulated field arithmetic in the Gnark circuit.
         // Enable Fq mode: recursion stages operate in BN254 base field (Fq).
         // Continue using self.transcript — it already has accumulated state from
-        // stages 1-8 (matching the real verifier's from_state fork).
+        // stages 1-8.
         crate::zkvm::fq_mode::set_fq_mode(true);
 
         self.transcript.debug_state("before_recursion_sumchecks");
@@ -1261,21 +1260,19 @@ impl<
             MAX_RECURSION_DENSE_NUM_VARS
         );
 
-        // Add dense commitment to main transcript (preserves main transcript state)
+        // Add dense commitment to main transcript
         self.transcript
             .append_serializable(&recursion_proof.dense_commitment);
 
-        // Fork to Fq Poseidon transcript for recursion (matching real verifier)
-        let mut fq_transcript = crate::transcripts::PoseidonTranscriptFq::new(b"recursion");
-        fq_transcript.append_serializable(&recursion_proof.dense_commitment);
-
+        // Verify recursion using the main transcript
         let verification_result = {
+            self.transcript.debug_state("before_recursion_sumchecks");
             let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
             recursion_verifier
-                .verify::<crate::transcripts::PoseidonTranscriptFq, HyraxPCS>(
-                    recursion_proof.as_retyped::<crate::transcripts::PoseidonTranscriptFq>(),
-                    &mut fq_transcript,
+                .verify::<ProofTranscript, HyraxPCS>(
+                    recursion_proof,
+                    &mut self.transcript,
                     &recursion_proof.dense_commitment,
                     hyrax_verifier_setup,
                 )

@@ -19,8 +19,6 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
 
-#[cfg(feature = "transcript-poseidon")]
-use crate::transcripts::PoseidonTranscriptFq;
 use crate::zkvm::proof_serialization::RecursionConstraintMetadata;
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 
@@ -726,28 +724,6 @@ where
         // Without: use main transcript (legacy behavior).
         let hyrax_setup = &self.preprocessing.hyrax_recursion_setup;
 
-        #[cfg(feature = "transcript-poseidon")]
-        let recursion_proof = {
-            // Fork Fr transcript state into Fq Poseidon for recursion.
-            // Preserves accumulated state from stages 1-8 so recursion
-            // challenges are bound to the entire protocol history.
-            let (fork_state_bytes, fork_n_rounds) = self.transcript.fork_state();
-            let mut fq_transcript = PoseidonTranscriptFq::from_state(
-                fork_state_bytes,
-                fork_n_rounds,
-            );
-            let (s1, s2, m, s4, s5, acc) =
-                Self::prove_stage12(&recursion_prover, &mut fq_transcript);
-            let (hp, oc) =
-                Self::prove_stage13(dense_mlpoly, acc, &mut fq_transcript, hyrax_setup);
-            RecursionProof {
-                stage1_proof: s1, stage2_proof: s2, stage3_m_eval: m,
-                stage4_proof: s4, stage5_proof: s5, opening_proof: hp,
-                gamma, delta, opening_claims: oc, dense_commitment,
-            }
-            .retype_transcript::<ProofTranscript>()
-        };
-        #[cfg(not(feature = "transcript-poseidon"))]
         let recursion_proof = {
             // prove_stage11 already appended dense_commitment to self.transcript
             let (s1, s2, m, s4, s5, acc) =

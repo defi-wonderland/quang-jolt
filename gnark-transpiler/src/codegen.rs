@@ -156,7 +156,7 @@ impl MemoizedCodeGen {
                 let node = get_node(node_id);
                 match node {
                     Node::Atom(_) => {}
-                    Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e) | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) | Node::FqNeg(e) | Node::FqTruncate128(e) => {
+                    Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e) | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e) | Node::FqNeg(e)  => {
                         if let Edge::NodeRef(id) = e {
                             stack.push(id);
                         }
@@ -170,7 +170,7 @@ impl MemoizedCodeGen {
                             stack.push(id);
                         }
                     }
-                    Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => {
+                    Node::Poseidon(e1, e2, e3) => {
                         if let Edge::NodeRef(id) = e1 {
                             stack.push(id);
                         }
@@ -239,7 +239,7 @@ impl MemoizedCodeGen {
                 Node::Atom(_) => {}
                 Node::Neg(e) | Node::Inv(e) | Node::Keccak256(e) | Node::ByteReverse(e)
                 | Node::Truncate128Reverse(e) | Node::Truncate128(e) | Node::MulTwoPow192(e)
-                | Node::FqNeg(e) | Node::FqTruncate128(e) => {
+                | Node::FqNeg(e)  => {
                     if let Edge::NodeRef(id) = e {
                         if !visited.contains(&id) {
                             stack.push((id, false));
@@ -259,7 +259,7 @@ impl MemoizedCodeGen {
                         }
                     }
                 }
-                Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => {
+                Node::Poseidon(e1, e2, e3) => {
                     if let Edge::NodeRef(id) = e3 {
                         if !visited.contains(&id) {
                             stack.push((id, false));
@@ -331,12 +331,6 @@ impl MemoizedCodeGen {
                     let d = self.edge_to_gnark_iterative(data);
                     format!("poseidon.Hash(api, {}, {}, {})", s, r, d)
                 }
-                Node::PoseidonFq(state, n_rounds, data) => {
-                    let s = self.edge_to_gnark_iterative(state);
-                    let r = self.edge_to_gnark_iterative(n_rounds);
-                    let d = self.edge_to_gnark_iterative(data);
-                    format!("poseidon.HashFq(api, fqField, {}, {}, {})", s, r, d)
-                }
                 Node::Keccak256(input) => {
                     let i = self.edge_to_gnark_iterative(input);
                     format!("keccak.Keccak256(api, {})", i)
@@ -383,13 +377,6 @@ impl MemoizedCodeGen {
                     self.has_fq = true;
                     let i = self.edge_to_gnark_fq(inner);
                     format!("fqField.Neg({})", i)
-                }
-                Node::FqTruncate128(input) => {
-                    // FqTruncate128 is used for Fq challenge derivation.
-                    // The result is used in Fq operations, but the truncation itself
-                    // operates on an Fr value (Poseidon hash output).
-                    let i = self.edge_to_gnark_iterative(input);
-                    format!("poseidon.FqTruncate128(api, {})", i)
                 }
             };
 
@@ -918,8 +905,7 @@ pub fn generate_stages_circuit(
         output.push_str("\t\"github.com/consensys/gnark/std/math/emulated\"\n");
     }
     if bindings_code.contains("poseidon.Hash")
-        || bindings_code.contains("poseidon.HashFq")
-        || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash") || e.contains("poseidon.HashFq"))
+        || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash"))
     {
         output.push_str("\t\"jolt_verifier/poseidon\"\n");
     }

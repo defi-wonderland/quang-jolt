@@ -33,20 +33,14 @@ use ark_ec::CurveGroup;
 use ark_serialize::CanonicalSerialize;
 use jolt_core::field::JoltField;
 use jolt_core::transcripts::Transcript;
-use jolt_core::zkvm::fq_mode::is_fq_mode;
 use std::borrow::Borrow;
 use jolt_core::zkvm::dory_replay::take_pending_dory_absorb_indices;
 use zklean_extractor::mle_ast::{set_pending_challenge, take_pending_append, take_pending_commitment_chunks, MleAst};
 
-/// Dispatch to Poseidon Fr or Fq based on current field mode.
-/// When is_fq_mode() is true (recursion stage), creates PoseidonFq AST nodes
-/// that will be codegen'd to poseidon.HashFq() in Go.
+/// Always use Fr-native Poseidon. Fq values from recursion sumcheck are already
+/// serialized to Fr (via from_le_bytes_mod_order) before reaching the transcript.
 fn hash_fn(state: &MleAst, n_rounds: &MleAst, data: &MleAst) -> MleAst {
-    if is_fq_mode() {
-        MleAst::poseidon_fq(state, n_rounds, data)
-    } else {
-        MleAst::poseidon(state, n_rounds, data)
-    }
+    MleAst::poseidon(state, n_rounds, data)
 }
 
 /// Convert 32 bytes (little-endian) to a [u64; 4] scalar.
@@ -413,14 +407,8 @@ impl Transcript for PoseidonAstTranscript {
         );
 
         let hash = self.challenge_mle();
-        // Use different truncation depending on whether we're in Fq mode:
-        // - Fr mode: Truncate128Reverse (125-bit mask + R^-1 for MontU128Challenge)
-        // - Fq mode: FqTruncate128 (simple from_u128 for Mont254BitChallenge)
-        let challenge = if is_fq_mode() {
-            MleAst::fq_truncate_128(&hash)
-        } else {
-            MleAst::truncate_128_reverse(&hash)
-        };
+        // Always use Truncate128Reverse (125-bit mask + R^-1 for MontU128Challenge)
+        let challenge = MleAst::truncate_128_reverse(&hash);
         set_pending_challenge(challenge);
         // The pending_challenge mechanism: F::from_bytes returns the pending challenge for MleAst
         let f_val: F = F::from_bytes(&[0u8; 16]);
@@ -443,12 +431,8 @@ impl Transcript for PoseidonAstTranscript {
         (0..len)
             .map(|_| {
                 let hash = self.challenge_mle();
-                // Use different truncation depending on whether we're in Fq mode
-                let challenge = if is_fq_mode() {
-                    MleAst::fq_truncate_128(&hash)
-                } else {
-                    MleAst::truncate_128_reverse(&hash)
-                };
+                // Always use Truncate128Reverse (125-bit mask + R^-1 for MontU128Challenge)
+                let challenge = MleAst::truncate_128_reverse(&hash);
                 set_pending_challenge(challenge);
                 let f_val: F = F::from_bytes(&[0u8; 16]);
                 // SAFETY: Verified F = MleAst above
@@ -464,10 +448,6 @@ impl Transcript for PoseidonAstTranscript {
 
     fn debug_state(&self, label: &str) {
         eprintln!("SYMBOLIC [{}]: n_rounds={}", label, self.n_rounds);
-    }
-
-    fn fork_state(&self) -> ([u8; 32], u32) {
-        panic!("fork_state not supported on symbolic transcript — use set_fq_mode(true) instead")
     }
 }
 

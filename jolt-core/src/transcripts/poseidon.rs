@@ -67,9 +67,6 @@ impl PoseidonParams<Fq> for FqParams {
 /// Type alias for the original Fr-based transcript (backwards compatible)
 pub type PoseidonTranscriptFr = PoseidonTranscript<Fr, FrParams>;
 
-/// Type alias for Fq-based transcript (for SNARK composition / Grumpkin Fr)
-pub type PoseidonTranscriptFq = PoseidonTranscript<Fq, FqParams>;
-
 /// Represents the current state of the protocol's Fiat-Shamir transcript using Poseidon.
 ///
 /// This implementation uses Poseidon with width 3 (accepting 3 field element inputs)
@@ -97,23 +94,6 @@ pub struct PoseidonTranscript<F: PrimeField, P: PoseidonParams<F>> {
     /// tell us where it happened.
     expected_state_history: Option<Vec<[u8; 32]>>,
     _marker: PhantomData<(F, P)>,
-}
-
-impl<F: PrimeField, P: PoseidonParams<F>> PoseidonTranscript<F, P> {
-    /// Create a transcript from an existing state and round counter.
-    /// Used to fork from an Fr transcript into an Fq transcript while
-    /// preserving the accumulated protocol state.
-    pub fn from_state(state: [u8; 32], n_rounds: u32) -> Self {
-        Self {
-            state,
-            n_rounds,
-            #[cfg(test)]
-            state_history: vec![state],
-            #[cfg(test)]
-            expected_state_history: None,
-            _marker: PhantomData,
-        }
-    }
 }
 
 impl<F: PrimeField, P: PoseidonParams<F>> Default for PoseidonTranscript<F, P> {
@@ -468,10 +448,6 @@ impl<F: PrimeField, P: PoseidonParams<F>> Transcript for PoseidonTranscript<F, P
     fn debug_state(&self, label: &str) {
         eprintln!("REAL [{}]: n_rounds={}", label, self.n_rounds);
     }
-
-    fn fork_state(&self) -> ([u8; 32], u32) {
-        (self.state, self.n_rounds)
-    }
 }
 
 #[cfg(test)]
@@ -737,7 +713,7 @@ mod tests {
     #[test]
     fn test_fq_transcript_works() {
         // Test that Fq transcript can be created and used
-        let mut transcript: PoseidonTranscriptFq = Transcript::new(b"fq_test");
+        let mut transcript: PoseidonTranscript<Fq, FqParams> = Transcript::new(b"fq_test");
         transcript.append_u64(12345);
         transcript.append_bytes(b"test data");
 
@@ -756,7 +732,7 @@ mod tests {
         // Fr and Fq transcripts should produce different results
         // (different MDS matrices and round constants)
         let fr_transcript: PoseidonTranscriptFr = Transcript::new(b"test");
-        let fq_transcript: PoseidonTranscriptFq = Transcript::new(b"test");
+        let fq_transcript: PoseidonTranscript<Fq, FqParams> = Transcript::new(b"test");
 
         // Initial states should differ due to different Poseidon parameters
         assert_ne!(fr_transcript.state, fq_transcript.state);
