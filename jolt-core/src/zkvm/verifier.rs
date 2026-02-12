@@ -1563,6 +1563,60 @@ where
 
         Ok(())
     }
+
+    /// Verify stages 1-7 and return the transcript state.
+    ///
+    /// This is used by the gnark transpiler to extract the transcript state
+    /// after stages 1-7, which is needed to continue the transcript for
+    /// recursion sumcheck verification in gnark.
+    ///
+    /// Returns the transcript after verification completes.
+    #[tracing::instrument(skip_all)]
+    pub fn verify_stages_1_7_and_get_transcript(mut self) -> Result<ProofTranscript, anyhow::Error> {
+        let _pprof_verify = pprof_scope!("verify_stages_1_7");
+
+        fiat_shamir_preamble(
+            &self.program_io,
+            self.proof.ram_K,
+            self.proof.trace_length,
+            &mut self.transcript,
+        );
+
+        // Append commitments to transcript
+        for commitment in &self.proof.commitments {
+            self.transcript.append_serializable(commitment);
+        }
+        // Append untrusted advice commitment to transcript
+        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
+            self.transcript
+                .append_serializable(untrusted_advice_commitment);
+        }
+        // Append trusted advice commitment to transcript
+        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
+            self.transcript
+                .append_serializable(trusted_advice_commitment);
+        }
+        if self.proof.program_mode == ProgramMode::Committed {
+            let trusted = self.preprocessing.program.as_committed()?;
+            for commitment in &trusted.bytecode_commitments {
+                self.transcript.append_serializable(commitment);
+            }
+            self.transcript
+                .append_serializable(&trusted.program_image_commitment);
+        }
+
+        self.verify_stage1()?;
+        self.verify_stage2()?;
+        self.verify_stage3()?;
+        self.verify_stage4()?;
+        self.verify_stage5()?;
+        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
+        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
+        self.verify_stage7()?;
+
+        // Return the transcript state for use in gnark recursion verification
+        Ok(self.transcript)
+    }
 }
 
 /// Shared preprocessing between prover and verifier.

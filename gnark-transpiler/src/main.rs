@@ -18,11 +18,12 @@ use gnark_transpiler::{
     PoseidonAstTranscript, sanitize_go_name, generate_stages_circuit,
 };
 use jolt_core::poly::commitment::dory::DoryCommitmentScheme;
-use jolt_core::transcripts::Transcript;
+use jolt_core::transcripts::{Transcript, PoseidonTranscriptFr};
 use jolt_core::zkvm::transpilable_verifier::{
     JoltVerifierPreprocessing as TranspilablePreprocessing, TranspilableVerifier, SharedPreprocessing
 };
 use jolt_core::zkvm::verifier::JoltVerifierPreprocessing as VerifierPreprocessing;
+use ark_bn254::Fr;
 use jolt_core::zkvm::program::VerifierProgram;
 use jolt_core::zkvm::RV64IMACProof;
 use common::jolt_device::JoltDevice;
@@ -137,7 +138,7 @@ fn main() {
             shared: SharedPreprocessing {
                 program_meta: real_preprocessing.shared.program_meta.clone(),
             },
-            ram: ram_preprocessing,
+            ram: ram_preprocessing.clone(),
             memory_layout: real_preprocessing.shared.memory_layout.clone(),
             hyrax_recursion_setup: real_preprocessing.hyrax_recursion_setup.clone(),
         };
@@ -259,9 +260,57 @@ fn main() {
     println!("  L: {} elements", hyrax_witness.l.len());
     println!("  R: {} elements", hyrax_witness.r.len());
 
+    // === Run Concrete Verification to Extract Transcript State ===
+    // We need the transcript state after stages 1-7 to continue the transcript
+    // in the gnark recursion verification.
+    println!("\n=== Running Concrete Verification (Stages 1-7) for Transcript State ===");
+
+    // Clone io_device for concrete verification (original consumed by symbolic)
+    let io_device_for_concrete: JoltDevice = {
+        let io_device_bytes = std::fs::read(&args.io_device)
+            .expect("Failed to re-read io_device file");
+        CanonicalDeserialize::deserialize_compressed(&io_device_bytes[..])
+            .expect("Failed to deserialize io_device")
+    };
+
+    // Clone proof for concrete verification
+    let proof_for_concrete: RV64IMACProof = {
+        let proof_bytes = std::fs::read(&args.proof)
+            .expect("Failed to re-read proof file");
+        CanonicalDeserialize::deserialize_compressed(&proof_bytes[..])
+            .expect("Failed to deserialize proof")
+    };
+
+    // Create concrete JoltVerifier (standard verifier, not TranspilableVerifier)
+    use jolt_core::zkvm::verifier::JoltVerifier;
+    let concrete_verifier = JoltVerifier::<
+        Fr,
+        DoryCommitmentScheme,
+        PoseidonTranscriptFr,
+    >::new(
+        &real_preprocessing,
+        proof_for_concrete,
+        io_device_for_concrete,
+        None, // trusted_advice_commitment
+        None, // debug_info
+    ).expect("Failed to create concrete verifier");
+
+    // Run stages 1-7 and get transcript state
+    let transcript_after_stages = concrete_verifier
+        .verify_stages_1_7_and_get_transcript()
+        .expect("Concrete verification of stages 1-7 failed");
+
+    println!("  Transcript state after stages 1-7:");
+    println!("    n_rounds: {}", transcript_after_stages.n_rounds);
+    println!("    state (first 8 bytes): {:02x?}", &transcript_after_stages.state[..8]);
+
     // === Extract Recursion Sumcheck Witness Data ===
     println!("\n=== Extracting Recursion Sumcheck Witness Data ===");
-    let recursion_witness = extract_recursion_witness(&real_proof);
+    let recursion_witness = extract_recursion_witness(
+        &real_proof,
+        transcript_after_stages.state,
+        transcript_after_stages.n_rounds,
+    );
 
     let recursion_witness_json = serde_json::to_string_pretty(&recursion_witness).expect("Failed to serialize recursion witness");
     let recursion_witness_path = output_dir.join(RECURSION_WITNESS_FILENAME);
@@ -510,6 +559,11 @@ fn grumpkin_point_to_strings(point: &ark_grumpkin::Affine) -> [String; 2] {
 /// This contains the coefficients and challenges for the emulated Fq sumchecks
 #[derive(Serialize)]
 struct RecursionWitness {
+    /// Transcript state after stages 1-7 (as decimal string, interpreted as Fr field element)
+    /// This is the initial state for the recursion transcript in gnark
+    transcript_state: String,
+    /// Number of transcript rounds after stages 1-7
+    transcript_n_rounds: u32,
     /// Stage 1 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2, c3, c4, c5, c6, c7]
     stage1_coeffs: Vec<Vec<String>>,
     /// Stage 2 coefficients: [round][coeff_idx] where coeff_idx = [c0, c2, c3, c4, c5, c6]
@@ -537,10 +591,22 @@ struct RecursionWitness {
 }
 
 /// Extract recursion sumcheck witness data from JoltProof
-fn extract_recursion_witness(proof: &RV64IMACProof) -> RecursionWitness {
-    use ark_bn254::Fq;
+///
+/// transcript_state: The 32-byte transcript state as LE bytes (from PoseidonTranscript.state)
+/// transcript_n_rounds: The number of rounds completed (from PoseidonTranscript.n_rounds)
+fn extract_recursion_witness(
+    proof: &RV64IMACProof,
+    transcript_state: [u8; 32],
+    transcript_n_rounds: u32,
+) -> RecursionWitness {
+    use ark_bn254::{Fq, Fr};
 
     let recursion_proof = &proof.recursion_proof;
+
+    // Convert transcript state bytes to Fr field element string
+    // The state is stored as LE bytes, convert to field element
+    let state_fr = Fr::from_le_bytes_mod_order(&transcript_state);
+    let transcript_state_str = state_fr.into_bigint().to_string();
 
     // Extract stage 1 coefficients (degree 7, so 7 coefficients per round)
     let stage1_coeffs: Vec<Vec<String>> = recursion_proof
@@ -621,6 +687,8 @@ fn extract_recursion_witness(proof: &RV64IMACProof) -> RecursionWitness {
     let stage5_expected = compute_sumcheck_eval_degree2(&stage5_coeffs, &stage5_challenges, &fq_modulus);
 
     RecursionWitness {
+        transcript_state: transcript_state_str,
+        transcript_n_rounds,
         stage1_coeffs,
         stage2_coeffs,
         stage4_coeffs,

@@ -698,31 +698,57 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
         let (point, claim) = self.openings.get(&opening_id)?;
         Some((point.clone(), *claim))
     }
-}
 
-impl<F> VerifierOpeningAccumulator<F>
-where
-    F: JoltField,
-{
-    pub fn new(log_T: usize) -> Self {
-        Self {
-            openings: BTreeMap::new(),
-            #[cfg(test)]
-            prover_opening_accumulator: None,
-            log_T,
+    fn append_virtual<T: Transcript>(
+        &mut self,
+        transcript: &mut T,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::Polynomial(PolynomialId::Virtual(polynomial), sumcheck);
+        if let Some((_, claim)) = self.openings.get(&key) {
+            transcript.append_scalar(claim);
+            let claim = *claim; // Copy the claim value
+            self.openings.insert(key, (opening_point.clone(), claim));
+        } else {
+            panic!("Tried to populate opening point for non-existent key: {key:?}");
         }
     }
 
-    /// Compare this accumulator to the corresponding `ProverOpeningAccumulator` and panic
-    /// if the openings appended differ from the prover's openings.
-    #[cfg(test)]
-    pub fn compare_to(&mut self, prover_openings: ProverOpeningAccumulator<F>) {
-        self.prover_opening_accumulator = Some(prover_openings);
+    fn append_untrusted_advice<T: Transcript>(
+        &mut self,
+        transcript: &mut T,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::UntrustedAdvice(sumcheck_id);
+        if let Some((_, claim)) = self.openings.get(&key) {
+            transcript.append_scalar(claim);
+            let claim = *claim;
+            self.openings.insert(key, (opening_point.clone(), claim));
+        } else {
+            panic!("Tried to populate opening point for non-existent key: {key:?}");
+        }
     }
 
-    /// Adds an opening of a dense polynomial the accumulator.
-    /// The given `polynomial` is opened at `opening_point`.
-    pub fn append_dense<T: Transcript>(
+    fn append_trusted_advice<T: Transcript>(
+        &mut self,
+        transcript: &mut T,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::TrustedAdvice(sumcheck_id);
+        if let Some((_, claim)) = self.openings.get(&key) {
+            transcript.append_scalar(claim);
+            let claim = *claim;
+            self.openings.insert(key, (opening_point.clone(), claim));
+        } else {
+            panic!("Tried to populate opening point for non-existent key: {key:?}");
+        }
+    }
+
+    fn append_dense<T: Transcript>(
         &mut self,
         transcript: &mut T,
         polynomial: CommittedPolynomial,
@@ -743,12 +769,7 @@ where
         );
     }
 
-    /// Adds openings to the accumulator. The polynomials underlying the given
-    /// `commitments` are opened at `opening_point`, yielding the claimed evaluations
-    /// `claims`.
-    /// Multiple sparse polynomials opened at a single point are NOT batched into
-    /// a single polynomial opened at the same point.
-    pub fn append_sparse<T: Transcript>(
+    fn append_sparse<T: Transcript>(
         &mut self,
         transcript: &mut T,
         polynomials: Vec<CommittedPolynomial>,
@@ -770,55 +791,26 @@ where
             );
         }
     }
+}
 
-    /// Populates the opening point for an existing claim in the evaluation_openings map.
-    pub fn append_virtual<T: Transcript>(
-        &mut self,
-        transcript: &mut T,
-        polynomial: VirtualPolynomial,
-        sumcheck: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::Polynomial(PolynomialId::Virtual(polynomial), sumcheck);
-        if let Some((_, claim)) = self.openings.get(&key) {
-            transcript.append_scalar(claim);
-            let claim = *claim; // Copy the claim value
-            self.openings.insert(key, (opening_point.clone(), claim));
-        } else {
-            panic!("Tried to populate opening point for non-existent key: {key:?}");
+impl<F> VerifierOpeningAccumulator<F>
+where
+    F: JoltField,
+{
+    pub fn new(log_T: usize) -> Self {
+        Self {
+            openings: BTreeMap::new(),
+            #[cfg(test)]
+            prover_opening_accumulator: None,
+            log_T,
         }
     }
 
-    pub fn append_untrusted_advice<T: Transcript>(
-        &mut self,
-        transcript: &mut T,
-        sumcheck_id: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::UntrustedAdvice(sumcheck_id);
-        if let Some((_, claim)) = self.openings.get(&key) {
-            transcript.append_scalar(claim);
-            let claim = *claim;
-            self.openings.insert(key, (opening_point.clone(), claim));
-        } else {
-            panic!("Tried to populate opening point for non-existent key: {key:?}");
-        }
-    }
-
-    pub fn append_trusted_advice<T: Transcript>(
-        &mut self,
-        transcript: &mut T,
-        sumcheck_id: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::TrustedAdvice(sumcheck_id);
-        if let Some((_, claim)) = self.openings.get(&key) {
-            transcript.append_scalar(claim);
-            let claim = *claim;
-            self.openings.insert(key, (opening_point.clone(), claim));
-        } else {
-            panic!("Tried to populate opening point for non-existent key: {key:?}");
-        }
+    /// Compare this accumulator to the corresponding `ProverOpeningAccumulator` and panic
+    /// if the openings appended differ from the prover's openings.
+    #[cfg(test)]
+    pub fn compare_to(&mut self, prover_openings: ProverOpeningAccumulator<F>) {
+        self.prover_opening_accumulator = Some(prover_openings);
     }
 
     /// Verifies a single opening directly without reduction.

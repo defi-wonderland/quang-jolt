@@ -32,6 +32,10 @@ import (
 
 // RecursionWitnessE2E represents the structure of recursion_witness.json
 type RecursionWitnessE2E struct {
+	// Transcript state after stages 1-7 (from Rust verifier)
+	TranscriptState   string `json:"transcript_state"`
+	TranscriptNRounds uint32 `json:"transcript_n_rounds"`
+
 	Stage1Coeffs     [][]string `json:"stage1_coeffs"`
 	Stage2Coeffs     [][]string `json:"stage2_coeffs"`
 	Stage4Coeffs     [][]string `json:"stage4_coeffs"`
@@ -550,11 +554,13 @@ func TestFullE2ESolver(t *testing.T) {
 	stage4Coeffs := loadStage4CoeffsLocal(&recursionWitness)
 	stage5Coeffs := loadStage5CoeffsLocal(&recursionWitness)
 
-	// Set initial transcript state (starts fresh for recursion verifier)
-	initialState := big.NewInt(0)
-	initialNRounds := int64(0)
+	// Set initial transcript state from stages 1-7 (from Rust verifier)
+	initialState := toBigIntLocal(recursionWitness.TranscriptState)
+	initialNRounds := int64(recursionWitness.TranscriptNRounds)
 	witness.RecursionInitialTranscriptState = initialState
 	witness.RecursionInitialNRounds = big.NewInt(initialNRounds)
+	t.Logf("  Transcript state from stages 1-7: %s", initialState.String())
+	t.Logf("  Transcript n_rounds from stages 1-7: %d", initialNRounds)
 
 	// Compute expected values using native Fr transcript
 	// This ensures the expected values match the transcript-derived challenges
@@ -736,11 +742,13 @@ func TestFullE2EGroth16(t *testing.T) {
 	stage4CoeffsG16 := loadStage4CoeffsLocal(&recursionWitnessGroth16)
 	stage5CoeffsG16 := loadStage5CoeffsLocal(&recursionWitnessGroth16)
 
-	// Set initial transcript state (starts fresh for recursion verifier)
-	initialStateG16 := big.NewInt(0)
-	initialNRoundsG16 := int64(0)
+	// Set initial transcript state from stages 1-7 (from Rust verifier)
+	initialStateG16 := toBigIntLocal(recursionWitnessGroth16.TranscriptState)
+	initialNRoundsG16 := int64(recursionWitnessGroth16.TranscriptNRounds)
 	witness.RecursionInitialTranscriptState = initialStateG16
 	witness.RecursionInitialNRounds = big.NewInt(initialNRoundsG16)
+	t.Logf("  Transcript state from stages 1-7: %s", initialStateG16.String())
+	t.Logf("  Transcript n_rounds from stages 1-7: %d", initialNRoundsG16)
 
 	// Compute expected values using native Fr transcript (must match circuit's transcript)
 	stage1ExpG16, stage2ExpG16, stage4ExpG16, stage5ExpG16 := computeAllStagesExpectedLocal(
