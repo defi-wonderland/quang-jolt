@@ -11,6 +11,7 @@ import (
 
 	"github.com/consensys/gnark/constraint/solver"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/math/emulated"
 )
 
 func init() {
@@ -137,6 +138,80 @@ func (c *BN254Chip) mix(state_ BN254State, constantMatrix [][]*big.Int) BN254Sta
 		}
 	}
 
+	return result
+}
+
+// HashFq computes Poseidon hash of 3 field elements using Fq (BN254 base field) parameters.
+// Uses emulated Fq arithmetic (mod p_Fq) inside a native Fr circuit.
+// Parameters from poseidon-paramgen v0.4.0: width=4, 8 full rounds, 56 partial rounds, alpha=5.
+func HashFq(api frontend.API, fqField *emulated.Field[emulated.BN254Fp], in1, in2, in3 frontend.Variable) frontend.Variable {
+	// Convert native Fr inputs to emulated Fq via bit decomposition
+	e1 := fqField.FromBits(api.ToBinary(in1, 254)...)
+	e2 := fqField.FromBits(api.ToBinary(in2, 254)...)
+	e3 := fqField.FromBits(api.ToBinary(in3, 254)...)
+
+	state := [FqWidth]*emulated.Element[emulated.BN254Fp]{fqField.Zero(), e1, e2, e3}
+
+	halfFull := FqFullRounds / 2 // 4
+
+	// First half of full rounds
+	for r := 0; r < halfFull; r++ {
+		for i := 0; i < FqWidth; i++ {
+			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[r*FqWidth+i])
+			state[i] = fqField.Add(state[i], &rc)
+		}
+		for i := 0; i < FqWidth; i++ {
+			state[i] = fqEmulatedExp5(fqField, state[i])
+		}
+		state = fqEmulatedMix(fqField, state)
+	}
+
+	// Partial rounds
+	for r := 0; r < FqPartialRounds; r++ {
+		rcOffset := halfFull*FqWidth + r*FqWidth
+		for i := 0; i < FqWidth; i++ {
+			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[rcOffset+i])
+			state[i] = fqField.Add(state[i], &rc)
+		}
+		state[0] = fqEmulatedExp5(fqField, state[0])
+		state = fqEmulatedMix(fqField, state)
+	}
+
+	// Second half of full rounds
+	for r := 0; r < halfFull; r++ {
+		rcOffset := (halfFull+FqPartialRounds)*FqWidth + r*FqWidth
+		for i := 0; i < FqWidth; i++ {
+			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[rcOffset+i])
+			state[i] = fqField.Add(state[i], &rc)
+		}
+		for i := 0; i < FqWidth; i++ {
+			state[i] = fqEmulatedExp5(fqField, state[i])
+		}
+		state = fqEmulatedMix(fqField, state)
+	}
+
+	// Convert result back to native Fr via bit decomposition
+	bits := fqField.ToBits(state[0])
+	return api.FromBinary(bits[:254]...)
+}
+
+func fqEmulatedExp5(fqField *emulated.Field[emulated.BN254Fp], x *emulated.Element[emulated.BN254Fp]) *emulated.Element[emulated.BN254Fp] {
+	x2 := fqField.Mul(x, x)
+	x4 := fqField.Mul(x2, x2)
+	return fqField.Mul(x4, x)
+}
+
+func fqEmulatedMix(fqField *emulated.Field[emulated.BN254Fp], state [FqWidth]*emulated.Element[emulated.BN254Fp]) [FqWidth]*emulated.Element[emulated.BN254Fp] {
+	var result [FqWidth]*emulated.Element[emulated.BN254Fp]
+	for i := 0; i < FqWidth; i++ {
+		acc := fqField.Zero()
+		for j := 0; j < FqWidth; j++ {
+			mds := emulated.ValueOf[emulated.BN254Fp](fqMdsMatrix[i][j])
+			term := fqField.Mul(&mds, state[j])
+			acc = fqField.Add(acc, term)
+		}
+		result[i] = acc
+	}
 	return result
 }
 

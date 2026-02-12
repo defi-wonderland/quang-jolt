@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use ark_bn254::Fq;
 use ark_grumpkin::Projective as GrumpkinProjective;
+#[cfg(feature = "transcript-poseidon")]
+use crate::transcripts::PoseidonTranscriptFq;
 
 use crate::poly::commitment::{
     commitment_scheme::{CommitmentScheme, RecursionExt},
@@ -1409,13 +1411,39 @@ where
             MAX_RECURSION_DENSE_NUM_VARS
         );
 
-        // Add dense commitment to transcript (must match prover's order)
+        // Add dense commitment to main transcript (must match prover's prove_stage11)
         self.transcript
             .append_serializable(&recursion_proof.dense_commitment);
         self.transcript.debug_state("after_dense_commitment");
 
-        self.transcript.debug_state("before_recursion_sumchecks");
+        // Verify recursion with appropriate transcript.
+        // With transcript-poseidon: fork to Fq Poseidon (BN254/Grumpkin 2-cycle).
+        // Without: use main transcript (legacy behavior).
+        #[cfg(feature = "transcript-poseidon")]
         let verification_result = {
+            // Fork Fr transcript state into Fq Poseidon for recursion.
+            // Preserves accumulated state from stages 1-8 + dense_commitment.
+            let (fork_state_bytes, fork_n_rounds) = self.transcript.fork_state();
+            let mut fq_transcript = PoseidonTranscriptFq::from_state(
+                fork_state_bytes,
+                fork_n_rounds,
+            );
+            fq_transcript.debug_state("before_recursion_sumchecks");
+            let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
+            recursion_verifier
+                .verify::<PoseidonTranscriptFq, HyraxPCS>(
+                    recursion_proof.as_retyped::<PoseidonTranscriptFq>(),
+                    &mut fq_transcript,
+                    &recursion_proof.dense_commitment,
+                    hyrax_verifier_setup,
+                )
+                .map_err(|e| anyhow::anyhow!("Recursion verification failed: {e:?}"))?
+        };
+        #[cfg(not(feature = "transcript-poseidon"))]
+        let verification_result = {
+            // dense_commitment already appended above
+            self.transcript.debug_state("before_recursion_sumchecks");
             let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
             recursion_verifier

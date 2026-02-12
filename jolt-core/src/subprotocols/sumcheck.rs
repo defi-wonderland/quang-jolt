@@ -269,6 +269,14 @@ pub struct SumcheckInstanceProof<F: JoltField, ProofTranscript: Transcript> {
 }
 
 impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTranscript> {
+    /// Convert to a different transcript type. Safe because only PhantomData changes.
+    pub fn retype_transcript<T2: Transcript>(self) -> SumcheckInstanceProof<F, T2> {
+        SumcheckInstanceProof {
+            compressed_polys: self.compressed_polys,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn new(
         compressed_polys: Vec<CompressedUniPoly<F>>,
     ) -> SumcheckInstanceProof<F, ProofTranscript> {

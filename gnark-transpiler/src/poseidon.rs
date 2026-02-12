@@ -38,6 +38,17 @@ use std::borrow::Borrow;
 use jolt_core::zkvm::dory_replay::take_pending_dory_absorb_indices;
 use zklean_extractor::mle_ast::{set_pending_challenge, take_pending_append, take_pending_commitment_chunks, MleAst};
 
+/// Dispatch to Poseidon Fr or Fq based on current field mode.
+/// When is_fq_mode() is true (recursion stage), creates PoseidonFq AST nodes
+/// that will be codegen'd to poseidon.HashFq() in Go.
+fn hash_fn(state: &MleAst, n_rounds: &MleAst, data: &MleAst) -> MleAst {
+    if is_fq_mode() {
+        MleAst::poseidon_fq(state, n_rounds, data)
+    } else {
+        MleAst::poseidon(state, n_rounds, data)
+    }
+}
+
 /// Convert 32 bytes (little-endian) to a [u64; 4] scalar.
 /// Uses `from_le_bytes_mod_order` to match the real PoseidonTranscript exactly:
 /// values exceeding the BN254 Fr modulus are reduced mod p.
@@ -98,7 +109,7 @@ impl PoseidonAstTranscript {
     pub fn new_mle(label: &'static [u8]) -> Self {
         let label_field = Self::label_to_field(label);
         let initial_state =
-            MleAst::poseidon(&label_field, &MleAst::from_u64(0), &MleAst::from_u64(0));
+            hash_fn(&label_field, &MleAst::from_u64(0), &MleAst::from_u64(0));
         Self {
             state: initial_state,
             n_rounds: 0,
@@ -110,7 +121,7 @@ impl PoseidonAstTranscript {
     /// Mirrors jolt-core: poseidon(state, n_rounds, element)
     fn hash_and_update(&mut self, element: MleAst) {
         let round = MleAst::from_u64(self.n_rounds as u64);
-        self.state = MleAst::poseidon(&self.state, &round, &element);
+        self.state = hash_fn(&self.state, &round, &element);
         self.n_rounds += 1;
     }
 
@@ -120,7 +131,7 @@ impl PoseidonAstTranscript {
     pub fn challenge_mle(&mut self) -> MleAst {
         let round = MleAst::from_u64(self.n_rounds as u64);
         let zero = MleAst::from_u64(0);
-        let challenge = MleAst::poseidon(&self.state, &round, &zero);
+        let challenge = hash_fn(&self.state, &round, &zero);
         self.state = challenge.clone();
         self.n_rounds += 1;
         challenge
@@ -143,15 +154,15 @@ impl PoseidonAstTranscript {
 
         // First element: includes n_rounds for domain separation
         let mut current = if let Some(first) = iter.next() {
-            MleAst::poseidon(&self.state, &round, first)
+            hash_fn(&self.state, &round, first)
         } else {
             // Empty: just hash state with n_rounds and zero
-            MleAst::poseidon(&self.state, &round, &zero)
+            hash_fn(&self.state, &round, &zero)
         };
 
         // Remaining elements: no n_rounds (already accounted for)
         for elem in iter {
-            current = MleAst::poseidon(&current, &zero, elem);
+            current = hash_fn(&current, &zero, elem);
         }
 
         self.state = current;
@@ -182,7 +193,7 @@ impl Transcript for PoseidonAstTranscript {
     fn new(label: &'static [u8]) -> Self {
         // Mirror jolt-core: initial_state = poseidon(label, 0, 0)
         let label_field = Self::label_to_field(label);
-        let initial_state = MleAst::poseidon(
+        let initial_state = hash_fn(
             &label_field,
             &MleAst::from_u64(0), // n_rounds = 0
             &MleAst::from_u64(0), // zero
@@ -202,7 +213,7 @@ impl Transcript for PoseidonAstTranscript {
         let limbs = bytes_to_scalar(&padded);
         let chunk_field = MleAst::from(limbs);
         let round = MleAst::from_u64(self.n_rounds as u64);
-        self.state = MleAst::poseidon(&self.state, &round, &chunk_field);
+        self.state = hash_fn(&self.state, &round, &chunk_field);
         self.n_rounds += 1;
     }
 
@@ -228,10 +239,10 @@ impl Transcript for PoseidonAstTranscript {
             let mut padded = [0u8; 32];
             padded[..first_chunk.len()].copy_from_slice(first_chunk);
             let chunk_field = MleAst::from(bytes_to_scalar(&padded));
-            MleAst::poseidon(&self.state, &round, &chunk_field)
+            hash_fn(&self.state, &round, &chunk_field)
         } else {
             // Empty bytes: just hash state with n_rounds and zero
-            MleAst::poseidon(&self.state, &round, &zero)
+            hash_fn(&self.state, &round, &zero)
         };
 
         // Remaining chunks: no n_rounds (already accounted for)
@@ -239,7 +250,7 @@ impl Transcript for PoseidonAstTranscript {
             let mut padded = [0u8; 32];
             padded[..chunk.len()].copy_from_slice(chunk);
             let chunk_field = MleAst::from(bytes_to_scalar(&padded));
-            current = MleAst::poseidon(&current, &zero, &chunk_field);
+            current = hash_fn(&current, &zero, &chunk_field);
         }
 
         self.state = current;
@@ -257,7 +268,7 @@ impl Transcript for PoseidonAstTranscript {
         let x_ast = MleAst::from_u64(x);
         let transformed = MleAst::mul_two_pow_192(&x_ast);
         let round = MleAst::from_u64(self.n_rounds as u64);
-        self.state = MleAst::poseidon(&self.state, &round, &transformed);
+        self.state = hash_fn(&self.state, &round, &transformed);
         self.n_rounds += 1;
     }
 
@@ -275,11 +286,11 @@ impl Transcript for PoseidonAstTranscript {
             // Apply byte-reverse to match PoseidonTranscript::append_scalar behavior:
             // PoseidonTranscript does: serialize(LE) -> reverse -> from_le_bytes_mod_order -> hash
             let byte_reversed = MleAst::byte_reverse(&mle_ast);
-            self.state = MleAst::poseidon(&self.state, &round, &byte_reversed);
+            self.state = hash_fn(&self.state, &round, &byte_reversed);
             self.n_rounds += 1;
         } else {
             // Fallback for non-MleAst types (shouldn't happen in transpilation)
-            self.state = MleAst::poseidon(&self.state, &round, &MleAst::from_u64(0));
+            self.state = hash_fn(&self.state, &round, &MleAst::from_u64(0));
             self.n_rounds += 1;
         }
     }
@@ -453,6 +464,10 @@ impl Transcript for PoseidonAstTranscript {
 
     fn debug_state(&self, label: &str) {
         eprintln!("SYMBOLIC [{}]: n_rounds={}", label, self.n_rounds);
+    }
+
+    fn fork_state(&self) -> ([u8; 32], u32) {
+        panic!("fork_state not supported on symbolic transcript — use set_fq_mode(true) instead")
     }
 }
 

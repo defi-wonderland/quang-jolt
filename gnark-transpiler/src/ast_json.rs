@@ -139,7 +139,7 @@ impl From<Node> for NodeJson {
                 left: left.into(),
                 right: right.into(),
             },
-            Node::Poseidon(state, n_rounds, data) => NodeJson::Poseidon {
+            Node::Poseidon(state, n_rounds, data) | Node::PoseidonFq(state, n_rounds, data) => NodeJson::Poseidon {
                 state: state.into(),
                 n_rounds: n_rounds.into(),
                 data: data.into(),

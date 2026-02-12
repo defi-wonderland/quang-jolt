@@ -99,6 +99,23 @@ pub struct PoseidonTranscript<F: PrimeField, P: PoseidonParams<F>> {
     _marker: PhantomData<(F, P)>,
 }
 
+impl<F: PrimeField, P: PoseidonParams<F>> PoseidonTranscript<F, P> {
+    /// Create a transcript from an existing state and round counter.
+    /// Used to fork from an Fr transcript into an Fq transcript while
+    /// preserving the accumulated protocol state.
+    pub fn from_state(state: [u8; 32], n_rounds: u32) -> Self {
+        Self {
+            state,
+            n_rounds,
+            #[cfg(test)]
+            state_history: vec![state],
+            #[cfg(test)]
+            expected_state_history: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<F: PrimeField, P: PoseidonParams<F>> Default for PoseidonTranscript<F, P> {
     fn default() -> Self {
         Self {
@@ -450,6 +467,10 @@ impl<F: PrimeField, P: PoseidonParams<F>> Transcript for PoseidonTranscript<F, P
 
     fn debug_state(&self, label: &str) {
         eprintln!("REAL [{}]: n_rounds={}", label, self.n_rounds);
+    }
+
+    fn fork_state(&self) -> ([u8; 32], u32) {
+        (self.state, self.n_rounds)
     }
 }
 

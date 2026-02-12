@@ -89,6 +89,34 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
     pub dense_commitment: PCS::Commitment,
 }
 
+impl<F: JoltField, T: Transcript, PCS: CommitmentScheme<Field = F>> RecursionProof<F, T, PCS> {
+    /// Convert to a different transcript type (owned). Safe because the transcript
+    /// type parameter only appears as PhantomData in inner proof types.
+    pub fn retype_transcript<T2: Transcript>(self) -> RecursionProof<F, T2, PCS> {
+        RecursionProof {
+            stage1_proof: self.stage1_proof.retype_transcript(),
+            stage2_proof: self.stage2_proof.retype_transcript(),
+            stage3_m_eval: self.stage3_m_eval,
+            stage4_proof: self.stage4_proof.retype_transcript(),
+            stage5_proof: self.stage5_proof.retype_transcript(),
+            opening_proof: self.opening_proof,
+            gamma: self.gamma,
+            delta: self.delta,
+            opening_claims: self.opening_claims,
+            dense_commitment: self.dense_commitment,
+        }
+    }
+
+    /// Borrow as a different transcript type (zero-cost).
+    /// SAFETY: T only appears as PhantomData in SumcheckInstanceProof and JaggedAssistProof,
+    /// so the memory layout is identical regardless of T.
+    pub fn as_retyped<T2: Transcript>(&self) -> &RecursionProof<F, T2, PCS> {
+        unsafe {
+            &*(self as *const RecursionProof<F, T, PCS> as *const RecursionProof<F, T2, PCS>)
+        }
+    }
+}
+
 /// Unified prover for the recursion SNARK
 #[derive(Clone)]
 pub struct RecursionProver<F: JoltField = Fq> {

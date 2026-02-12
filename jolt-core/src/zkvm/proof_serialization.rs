@@ -40,6 +40,8 @@ use crate::{
 };
 use ark_bn254::{Fq, Fq12};
 use ark_grumpkin::Projective as GrumpkinProjective;
+#[cfg(feature = "transcript-poseidon")]
+use crate::transcripts::PoseidonTranscriptFq;
 
 /// Constraint metadata for the recursion verifier
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]

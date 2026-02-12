@@ -264,6 +264,10 @@ impl Transcript for Blake2bTranscript {
         println!("TRANSCRIPT DEBUG [{}]: n_rounds={}, state={:02x?}",
             label, self.n_rounds, &self.state[..8]);
     }
+
+    fn fork_state(&self) -> ([u8; 32], u32) {
+        (self.state, self.n_rounds)
+    }
 }
 
 #[cfg(test)]

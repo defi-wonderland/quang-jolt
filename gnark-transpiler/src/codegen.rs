@@ -170,7 +170,7 @@ impl MemoizedCodeGen {
                             stack.push(id);
                         }
                     }
-                    Node::Poseidon(e1, e2, e3) => {
+                    Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => {
                         if let Edge::NodeRef(id) = e1 {
                             stack.push(id);
                         }
@@ -259,7 +259,7 @@ impl MemoizedCodeGen {
                         }
                     }
                 }
-                Node::Poseidon(e1, e2, e3) => {
+                Node::Poseidon(e1, e2, e3) | Node::PoseidonFq(e1, e2, e3) => {
                     if let Edge::NodeRef(id) = e3 {
                         if !visited.contains(&id) {
                             stack.push((id, false));
@@ -330,6 +330,12 @@ impl MemoizedCodeGen {
                     let r = self.edge_to_gnark_iterative(n_rounds);
                     let d = self.edge_to_gnark_iterative(data);
                     format!("poseidon.Hash(api, {}, {}, {})", s, r, d)
+                }
+                Node::PoseidonFq(state, n_rounds, data) => {
+                    let s = self.edge_to_gnark_iterative(state);
+                    let r = self.edge_to_gnark_iterative(n_rounds);
+                    let d = self.edge_to_gnark_iterative(data);
+                    format!("poseidon.HashFq(api, fqField, {}, {}, {})", s, r, d)
                 }
                 Node::Keccak256(input) => {
                     let i = self.edge_to_gnark_iterative(input);
@@ -699,7 +705,8 @@ pub fn generate_circuit_from_bundle_with_stats(
     output.push_str("\n");
     output.push_str("\t\"github.com/consensys/gnark/frontend\"\n");
     if bindings_code.contains("poseidon.Hash")
-        || constraint_data.iter().any(|(_, e, _, _, _, _)| e.contains("poseidon.Hash"))
+        || bindings_code.contains("poseidon.HashFq")
+        || constraint_data.iter().any(|(_, e, _, _, _, _)| e.contains("poseidon.Hash") || e.contains("poseidon.HashFq"))
     {
         output.push_str("\t\"jolt_verifier/poseidon\"\n");
     }
@@ -911,7 +918,8 @@ pub fn generate_stages_circuit(
         output.push_str("\t\"github.com/consensys/gnark/std/math/emulated\"\n");
     }
     if bindings_code.contains("poseidon.Hash")
-        || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash"))
+        || bindings_code.contains("poseidon.HashFq")
+        || assertion_exprs.iter().any(|e| e.contains("poseidon.Hash") || e.contains("poseidon.HashFq"))
     {
         output.push_str("\t\"jolt_verifier/poseidon\"\n");
     }

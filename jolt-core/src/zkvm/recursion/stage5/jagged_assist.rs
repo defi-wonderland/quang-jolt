@@ -68,6 +68,16 @@ pub struct JaggedAssistProof<F: JoltField, T: Transcript> {
     pub sumcheck_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
 }
 
+impl<F: JoltField, T: Transcript> JaggedAssistProof<F, T> {
+    /// Convert to a different transcript type. Safe because only PhantomData changes.
+    pub fn retype_transcript<T2: Transcript>(self) -> JaggedAssistProof<F, T2> {
+        JaggedAssistProof {
+            claimed_evaluations: self.claimed_evaluations,
+            sumcheck_proof: self.sumcheck_proof.retype_transcript(),
+        }
+    }
+}
+
 /// Parameters for the Jagged Assist sumcheck
 #[derive(Clone, Debug)]
 pub struct JaggedAssistParams<F: JoltField> {

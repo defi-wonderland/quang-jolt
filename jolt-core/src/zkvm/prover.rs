@@ -19,6 +19,8 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
 
+#[cfg(feature = "transcript-poseidon")]
+use crate::transcripts::PoseidonTranscriptFq;
 use crate::zkvm::proof_serialization::RecursionConstraintMetadata;
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 
@@ -716,28 +718,47 @@ where
         // Stage 11: Build dense polynomial and commit (must happen BEFORE sumchecks for soundness)
         let (_dense_poly, dense_commitment, dense_mlpoly) = self.prove_stage11(&recursion_prover);
 
-        // Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
-        let (stage1_proof, stage2_proof, stage3_m_eval, stage4_proof, stage5_proof, accumulator) =
-            self.prove_stage12(&recursion_prover);
-
-        // Stage 13: Generate Hyrax opening proof
-        let (hyrax_proof, opening_claims) = self.prove_stage13(dense_mlpoly, accumulator);
-
         let gamma = recursion_prover.gamma;
         let delta = recursion_prover.delta;
 
-        // Assemble recursion proof
-        let recursion_proof = RecursionProof {
-            stage1_proof,
-            stage2_proof,
-            stage3_m_eval,
-            stage4_proof,
-            stage5_proof,
-            opening_proof: hyrax_proof,
-            gamma,
-            delta,
-            opening_claims,
-            dense_commitment,
+        // Run recursion subprotocols (stages 12-13) with the appropriate transcript.
+        // With transcript-poseidon: fork to Fq Poseidon (BN254/Grumpkin 2-cycle).
+        // Without: use main transcript (legacy behavior).
+        let hyrax_setup = &self.preprocessing.hyrax_recursion_setup;
+
+        #[cfg(feature = "transcript-poseidon")]
+        let recursion_proof = {
+            // Fork Fr transcript state into Fq Poseidon for recursion.
+            // Preserves accumulated state from stages 1-8 so recursion
+            // challenges are bound to the entire protocol history.
+            let (fork_state_bytes, fork_n_rounds) = self.transcript.fork_state();
+            let mut fq_transcript = PoseidonTranscriptFq::from_state(
+                fork_state_bytes,
+                fork_n_rounds,
+            );
+            let (s1, s2, m, s4, s5, acc) =
+                Self::prove_stage12(&recursion_prover, &mut fq_transcript);
+            let (hp, oc) =
+                Self::prove_stage13(dense_mlpoly, acc, &mut fq_transcript, hyrax_setup);
+            RecursionProof {
+                stage1_proof: s1, stage2_proof: s2, stage3_m_eval: m,
+                stage4_proof: s4, stage5_proof: s5, opening_proof: hp,
+                gamma, delta, opening_claims: oc, dense_commitment,
+            }
+            .retype_transcript::<ProofTranscript>()
+        };
+        #[cfg(not(feature = "transcript-poseidon"))]
+        let recursion_proof = {
+            // prove_stage11 already appended dense_commitment to self.transcript
+            let (s1, s2, m, s4, s5, acc) =
+                Self::prove_stage12(&recursion_prover, &mut self.transcript);
+            let (hp, oc) =
+                Self::prove_stage13(dense_mlpoly, acc, &mut self.transcript, hyrax_setup);
+            RecursionProof {
+                stage1_proof: s1, stage2_proof: s2, stage3_m_eval: m,
+                stage4_proof: s4, stage5_proof: s5, opening_proof: hp,
+                gamma, delta, opening_claims: oc, dense_commitment,
+            }
         };
 
         #[cfg(test)]
@@ -2422,18 +2443,19 @@ where
         })
     }
 
-    /// Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
+    /// Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial.
+    /// Uses a separate Fq Poseidon transcript for Fiat-Shamir, matching the BN254/Grumpkin 2-cycle design.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
-    fn prove_stage12(
-        &mut self,
+    fn prove_stage12<RecT: Transcript>(
         recursion_prover: &RecursionProver<Fq>,
+        recursion_transcript: &mut RecT,
     ) -> (
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
+        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, RecT>,
+        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, RecT>,
         Fq, // stage3_m_eval
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        crate::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof<Fq, ProofTranscript>,
+        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, RecT>,
+        crate::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof<Fq, RecT>,
         ProverOpeningAccumulator<Fq>,
     ) {
         tracing::info!("Stage 12: Running recursion sumchecks");
@@ -2451,7 +2473,7 @@ where
             tracing::info_span!("recursion_stage12_1_packed_gt_exp").in_scope(|| {
                 tracing::info!("Running Stage 12.1: Packed GT exp sumcheck");
                 recursion_prover
-                    .prove_stage1(&mut self.transcript, &mut accumulator)
+                    .prove_stage1(recursion_transcript, &mut accumulator)
                     .expect("Failed to run Stage 1 (PackedGtExp)")
             });
 
@@ -2460,7 +2482,7 @@ where
             .in_scope(|| {
                 tracing::info!("Running Stage 12.2: Batched constraint sumchecks");
                 recursion_prover
-                    .prove_stage2(&mut self.transcript, &mut accumulator)
+                    .prove_stage2(recursion_transcript, &mut accumulator)
                     .expect("Failed to run Stage 2 (constraint sumchecks)")
             });
 
@@ -2469,7 +2491,7 @@ where
             .in_scope(|| {
                 tracing::info!("Running Stage 12.3: Virtualization direct evaluation");
                 recursion_prover
-                    .prove_stage3(&mut self.transcript, &mut accumulator, &r_x)
+                    .prove_stage3(recursion_transcript, &mut accumulator, &r_x)
                     .expect("Failed to run Stage 3 (virtualization)")
             });
 
@@ -2478,7 +2500,7 @@ where
             tracing::info_span!("recursion_stage12_4_jagged").in_scope(|| {
                 tracing::info!("Running Stage 12.4: Jagged transform sumcheck");
                 recursion_prover
-                    .prove_stage4(&mut self.transcript, &mut accumulator, &r_s, &r_x)
+                    .prove_stage4(recursion_transcript, &mut accumulator, &r_s, &r_x)
                     .expect("Failed to run Stage 4 (jagged)")
             });
 
@@ -2487,7 +2509,7 @@ where
             tracing::info_span!("recursion_stage12_5_jagged_assist").in_scope(|| {
                 tracing::info!("Running Stage 12.5: Jagged assist");
                 recursion_prover
-                    .prove_stage5(&mut self.transcript, &mut accumulator, &r_dense, &r_x)
+                    .prove_stage5(recursion_transcript, &mut accumulator, &r_dense, &r_x)
                     .expect("Failed to run Stage 5 (jagged assist)")
             });
 
@@ -2559,10 +2581,11 @@ where
 
     /// Stage 13: Generate Hyrax opening proof
     #[tracing::instrument(skip_all)]
-    fn prove_stage13(
-        &mut self,
+    fn prove_stage13<RecT: Transcript>(
         dense_mlpoly: MultilinearPolynomial<Fq>,
         mut accumulator: ProverOpeningAccumulator<Fq>,
+        recursion_transcript: &mut RecT,
+        hyrax_setup: &<Hyrax<1, GrumpkinProjective> as CommitmentScheme>::ProverSetup,
     ) -> (
         <Hyrax<1, GrumpkinProjective> as CommitmentScheme>::Proof,
         Openings<Fq>,
@@ -2582,10 +2605,10 @@ where
         // Generate opening proof
         let opening_proof = tracing::info_span!("generate_hyrax_opening_proof").in_scope(|| {
             let proof = accumulator
-                .prove_single::<ProofTranscript, HyraxPCS>(
+                .prove_single::<RecT, HyraxPCS>(
                     polynomials_map,
-                    &self.preprocessing.hyrax_recursion_setup,
-                    &mut self.transcript,
+                    hyrax_setup,
+                    recursion_transcript,
                 )
                 .expect("Failed to generate Hyrax opening proof");
             tracing::info!("Generated Hyrax opening proof");
