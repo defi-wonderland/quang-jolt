@@ -21,6 +21,35 @@ import (
 	"github.com/consensys/gnark/std/math/emulated"
 )
 
+// Constants for each stage
+const (
+	Stage1Rounds    = 11
+	Stage1CoeffsNum = 7 // c0, c2, c3, c4, c5, c6, c7 (degree 7)
+	Stage2Rounds    = 11
+	Stage2CoeffsNum = 6 // c0, c2, c3, c4, c5, c6 (degree 6)
+	Stage4Rounds    = 22
+	Stage4CoeffsNum = 2 // c0, c2 (degree 2)
+	Stage5Rounds    = 88
+	Stage5CoeffsNum = 2 // c0, c2 (degree 2)
+)
+
+// Pre-computed message constants (right-padded to 32 bytes)
+var (
+	// "UniPoly_begin" padded to 32 bytes
+	UniPolyBeginMsg = [32]byte{
+		'U', 'n', 'i', 'P', 'o', 'l', 'y', '_', 'b', 'e', 'g', 'i', 'n',
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	// "UniPoly_end" padded to 32 bytes
+	UniPolyEndMsg = [32]byte{
+		'U', 'n', 'i', 'P', 'o', 'l', 'y', '_', 'e', 'n', 'd',
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+)
+
+// FqElem is an alias for BN254 base field element (= Grumpkin scalar field)
+type FqElem = emulated.Element[emulated.BN254Fp]
+
 // TranscriptDerivedFrStage1Circuit verifies Stage 1 sumcheck with NATIVE Fr transcript.
 // This is much more efficient than FqTranscript because native Poseidon is ~120x cheaper.
 //

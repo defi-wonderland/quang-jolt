@@ -1,7 +1,9 @@
 package hyrax
 
 import (
+	"encoding/json"
 	"math/big"
+	"os"
 	"testing"
 	"time"
 
@@ -14,6 +16,162 @@ import (
 	"github.com/consensys/gnark/std/math/emulated"
 	"github.com/consensys/gnark/test"
 )
+
+// Field moduli for native big.Int computation in tests
+var (
+	// BN254 scalar field (Fr)
+	FrMod, _ = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	// BN254 base field (Fq) = Grumpkin scalar field
+	FqMod, _ = new(big.Int).SetString("21888242871839275222246405745257275088696311157297823662689037894645226208583", 10)
+)
+
+// hashNativeLocal computes native Poseidon hash for tests (using circom constants)
+func hashNativeLocal(in1, in2, in3 *big.Int) *big.Int {
+	state := [4]*big.Int{big.NewInt(0), new(big.Int).Set(in1), new(big.Int).Set(in2), new(big.Int).Set(in3)}
+
+	cConsts := poseidon.GetCConstants()
+	mMatrix := poseidon.GetMMatrix()
+
+	fullRounds := 8
+	partialRounds := 56
+	width := 4
+	halfFull := fullRounds / 2
+
+	exp5 := func(x *big.Int) *big.Int {
+		x2 := new(big.Int).Mul(x, x)
+		x2.Mod(x2, FrMod)
+		x4 := new(big.Int).Mul(x2, x2)
+		x4.Mod(x4, FrMod)
+		x5 := new(big.Int).Mul(x4, x)
+		x5.Mod(x5, FrMod)
+		return x5
+	}
+
+	mix := func(st [4]*big.Int) [4]*big.Int {
+		var result [4]*big.Int
+		for i := 0; i < width; i++ {
+			acc := new(big.Int)
+			for j := 0; j < width; j++ {
+				term := new(big.Int).Mul(mMatrix[j][i], st[j])
+				acc.Add(acc, term)
+			}
+			acc.Mod(acc, FrMod)
+			result[i] = acc
+		}
+		return result
+	}
+
+	constIdx := 0
+
+	// First half full rounds
+	for r := 0; r < halfFull; r++ {
+		for i := 0; i < width; i++ {
+			state[i] = new(big.Int).Add(state[i], cConsts[constIdx])
+			state[i].Mod(state[i], FrMod)
+			constIdx++
+		}
+		for i := 0; i < width; i++ {
+			state[i] = exp5(state[i])
+		}
+		state = mix(state)
+	}
+
+	// Partial rounds
+	for r := 0; r < partialRounds; r++ {
+		for i := 0; i < width; i++ {
+			state[i] = new(big.Int).Add(state[i], cConsts[constIdx])
+			state[i].Mod(state[i], FrMod)
+			constIdx++
+		}
+		state[0] = exp5(state[0])
+		state = mix(state)
+	}
+
+	// Last half full rounds
+	for r := 0; r < halfFull; r++ {
+		for i := 0; i < width; i++ {
+			state[i] = new(big.Int).Add(state[i], cConsts[constIdx])
+			state[i].Mod(state[i], FrMod)
+			constIdx++
+		}
+		for i := 0; i < width; i++ {
+			state[i] = exp5(state[i])
+		}
+		state = mix(state)
+	}
+
+	return state[0]
+}
+
+// RecursionWitness represents the structure of recursion_witness.json
+type RecursionWitness struct {
+	Stage1Coeffs [][]string `json:"stage1_coeffs"`
+	Stage2Coeffs [][]string `json:"stage2_coeffs"`
+	Stage4Coeffs [][]string `json:"stage4_coeffs"`
+	Stage5Coeffs [][]string `json:"stage5_coeffs"`
+}
+
+func loadRecursionWitness(t *testing.T) *RecursionWitness {
+	data, err := os.ReadFile("recursion_witness.json")
+	if err != nil {
+		t.Skipf("Could not load recursion_witness.json: %v", err)
+	}
+	var w RecursionWitness
+	if err := json.Unmarshal(data, &w); err != nil {
+		t.Fatalf("Failed to parse recursion witness: %v", err)
+	}
+	return &w
+}
+
+func toBigInt(s string) *big.Int {
+	n := new(big.Int)
+	n.SetString(s, 10)
+	return n
+}
+
+func loadStage1Coeffs(w *RecursionWitness) [][7]*big.Int {
+	coeffs := make([][7]*big.Int, len(w.Stage1Coeffs))
+	for round := 0; round < len(w.Stage1Coeffs); round++ {
+		coeffs[round] = [7]*big.Int{}
+		for i := 0; i < 7; i++ {
+			coeffs[round][i] = toBigInt(w.Stage1Coeffs[round][i])
+		}
+	}
+	return coeffs
+}
+
+func loadStage2Coeffs(w *RecursionWitness) [][6]*big.Int {
+	coeffs := make([][6]*big.Int, len(w.Stage2Coeffs))
+	for round := 0; round < len(w.Stage2Coeffs); round++ {
+		coeffs[round] = [6]*big.Int{}
+		for i := 0; i < 6; i++ {
+			coeffs[round][i] = toBigInt(w.Stage2Coeffs[round][i])
+		}
+	}
+	return coeffs
+}
+
+func loadStage4Coeffs(w *RecursionWitness) [][2]*big.Int {
+	coeffs := make([][2]*big.Int, len(w.Stage4Coeffs))
+	for round := 0; round < len(w.Stage4Coeffs); round++ {
+		coeffs[round] = [2]*big.Int{}
+		for i := 0; i < 2; i++ {
+			coeffs[round][i] = toBigInt(w.Stage4Coeffs[round][i])
+		}
+	}
+	return coeffs
+}
+
+func loadStage5Coeffs(w *RecursionWitness) [][2]*big.Int {
+	coeffs := make([][2]*big.Int, len(w.Stage5Coeffs))
+	for round := 0; round < len(w.Stage5Coeffs); round++ {
+		coeffs[round] = [2]*big.Int{}
+		for i := 0; i < 2; i++ {
+			coeffs[round][i] = toBigInt(w.Stage5Coeffs[round][i])
+		}
+	}
+	return coeffs
+}
 
 // FrTranscriptNative is a native (non-circuit) implementation of Fr Poseidon transcript
 // for computing expected values in tests.
@@ -31,7 +189,7 @@ func NewFrTranscriptNative(state *big.Int, nRounds int64) *FrTranscriptNative {
 
 func (t *FrTranscriptNative) AppendScalar(scalar *big.Int) {
 	nRoundsBig := big.NewInt(t.nRounds)
-	t.state = poseidon.HashNative(t.state, nRoundsBig, scalar)
+	t.state = hashNativeLocal(t.state, nRoundsBig, scalar)
 	t.nRounds++
 }
 
@@ -52,7 +210,7 @@ func (t *FrTranscriptNative) AppendScalarFq(scalar *big.Int) {
 func (t *FrTranscriptNative) ChallengeScalar() *big.Int {
 	nRoundsBig := big.NewInt(t.nRounds)
 	zero := big.NewInt(0)
-	output := poseidon.HashNative(t.state, nRoundsBig, zero)
+	output := hashNativeLocal(t.state, nRoundsBig, zero)
 	t.state = output
 	t.nRounds++
 	return new(big.Int).Set(output)
