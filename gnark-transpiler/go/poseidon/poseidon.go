@@ -157,8 +157,8 @@ func HashFq(api frontend.API, fqField *emulated.Field[emulated.BN254Fp], in1, in
 	// First half of full rounds
 	for r := 0; r < halfFull; r++ {
 		for i := 0; i < FqWidth; i++ {
-			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[r*FqWidth+i])
-			state[i] = fqField.Add(state[i], &rc)
+			rc := fqField.NewElement(fqRoundConstants[r*FqWidth+i])
+			state[i] = fqField.Add(state[i], rc)
 		}
 		for i := 0; i < FqWidth; i++ {
 			state[i] = fqEmulatedExp5(fqField, state[i])
@@ -170,8 +170,8 @@ func HashFq(api frontend.API, fqField *emulated.Field[emulated.BN254Fp], in1, in
 	for r := 0; r < FqPartialRounds; r++ {
 		rcOffset := halfFull*FqWidth + r*FqWidth
 		for i := 0; i < FqWidth; i++ {
-			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[rcOffset+i])
-			state[i] = fqField.Add(state[i], &rc)
+			rc := fqField.NewElement(fqRoundConstants[rcOffset+i])
+			state[i] = fqField.Add(state[i], rc)
 		}
 		state[0] = fqEmulatedExp5(fqField, state[0])
 		state = fqEmulatedMix(fqField, state)
@@ -181,8 +181,8 @@ func HashFq(api frontend.API, fqField *emulated.Field[emulated.BN254Fp], in1, in
 	for r := 0; r < halfFull; r++ {
 		rcOffset := (halfFull+FqPartialRounds)*FqWidth + r*FqWidth
 		for i := 0; i < FqWidth; i++ {
-			rc := emulated.ValueOf[emulated.BN254Fp](fqRoundConstants[rcOffset+i])
-			state[i] = fqField.Add(state[i], &rc)
+			rc := fqField.NewElement(fqRoundConstants[rcOffset+i])
+			state[i] = fqField.Add(state[i], rc)
 		}
 		for i := 0; i < FqWidth; i++ {
 			state[i] = fqEmulatedExp5(fqField, state[i])
@@ -191,7 +191,9 @@ func HashFq(api frontend.API, fqField *emulated.Field[emulated.BN254Fp], in1, in
 	}
 
 	// Convert result back to native Fr via bit decomposition
-	bits := fqField.ToBits(state[0])
+	// Must Reduce first to get canonical representation for ToBits
+	reduced := fqField.Reduce(state[0])
+	bits := fqField.ToBits(reduced)
 	return api.FromBinary(bits[:254]...)
 }
 
@@ -206,11 +208,12 @@ func fqEmulatedMix(fqField *emulated.Field[emulated.BN254Fp], state [FqWidth]*em
 	for i := 0; i < FqWidth; i++ {
 		acc := fqField.Zero()
 		for j := 0; j < FqWidth; j++ {
-			mds := emulated.ValueOf[emulated.BN254Fp](fqMdsMatrix[i][j])
-			term := fqField.Mul(&mds, state[j])
+			mds := fqField.NewElement(fqMdsMatrix[i][j])
+			term := fqField.Mul(mds, state[j])
 			acc = fqField.Add(acc, term)
 		}
-		result[i] = acc
+		// Reduce after accumulation to ensure canonical form for next round
+		result[i] = fqField.Reduce(acc)
 	}
 	return result
 }
