@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"jolt_verifier/poseidon"
+
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/grumpkin"
 	fp_grumpkin "github.com/consensys/gnark-crypto/ecc/grumpkin/fp"
@@ -60,7 +62,7 @@ type HyraxWitnessJSONE2E struct {
 
 // FullE2ECircuit combines all Jolt verifier components:
 // 1. Stages 1-7 (transpiled sumcheck) - embedded
-// 2. Recursion sumchecks (emulated Fq) - inline
+// 2. Recursion sumchecks (emulated Fq) - inline with transcript-derived challenges
 // 3. Hyrax opening (native Grumpkin MSM) - inline
 type FullE2ECircuit struct {
 	// =========================================================================
@@ -70,27 +72,28 @@ type FullE2ECircuit struct {
 
 	// =========================================================================
 	// Part 2: Recursion Sumcheck Inputs (a17-a21, emulated Fq)
+	// Challenges are derived via Fr Poseidon transcript, NOT passed as hints
 	// =========================================================================
 
+	// Initial transcript state (from stages 1-7 transcript)
+	RecursionInitialTranscriptState frontend.Variable `gnark:",public"`
+	RecursionInitialNRounds         frontend.Variable `gnark:",public"`
+
 	// Stage 1 (a17): 11 rounds, degree 7
-	RecursionStage1Coeffs     [11][7]sw_grumpkin.Scalar `gnark:",public"`
-	RecursionStage1Challenges [11]frontend.Variable     `gnark:",public"`
-	RecursionStage1Expected   sw_grumpkin.Scalar        `gnark:",public"`
+	RecursionStage1Coeffs   [11][7]sw_grumpkin.Scalar `gnark:",public"`
+	RecursionStage1Expected sw_grumpkin.Scalar        `gnark:",public"`
 
 	// Stage 2 (a18): 11 rounds, degree 6
-	RecursionStage2Coeffs     [11][6]sw_grumpkin.Scalar `gnark:",public"`
-	RecursionStage2Challenges [11]frontend.Variable     `gnark:",public"`
-	RecursionStage2Expected   sw_grumpkin.Scalar        `gnark:",public"`
+	RecursionStage2Coeffs   [11][6]sw_grumpkin.Scalar `gnark:",public"`
+	RecursionStage2Expected sw_grumpkin.Scalar        `gnark:",public"`
 
 	// Stage 4 (a20): 22 rounds, degree 2
-	RecursionStage4Coeffs     [22][2]sw_grumpkin.Scalar `gnark:",public"`
-	RecursionStage4Challenges [22]frontend.Variable     `gnark:",public"`
-	RecursionStage4Expected   sw_grumpkin.Scalar        `gnark:",public"`
+	RecursionStage4Coeffs   [22][2]sw_grumpkin.Scalar `gnark:",public"`
+	RecursionStage4Expected sw_grumpkin.Scalar        `gnark:",public"`
 
 	// Stage 5 (a21): 88 rounds, degree 2
-	RecursionStage5Coeffs     [88][2]sw_grumpkin.Scalar `gnark:",public"`
-	RecursionStage5Challenges [88]frontend.Variable     `gnark:",public"`
-	RecursionStage5Expected   sw_grumpkin.Scalar        `gnark:",public"`
+	RecursionStage5Coeffs   [88][2]sw_grumpkin.Scalar `gnark:",public"`
+	RecursionStage5Expected sw_grumpkin.Scalar        `gnark:",public"`
 
 	// =========================================================================
 	// Part 3: Hyrax Opening Inputs (native Grumpkin MSM)
@@ -121,6 +124,20 @@ type FullE2ECircuit struct {
 	HyraxV frontend.Variable `gnark:",public"`
 }
 
+// Pre-computed message constants (right-padded to 32 bytes) for transcript protocol
+var (
+	// "UniPoly_begin" padded to 32 bytes
+	uniPolyBeginMsg = [32]byte{
+		'U', 'n', 'i', 'P', 'o', 'l', 'y', '_', 'b', 'e', 'g', 'i', 'n',
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	// "UniPoly_end" padded to 32 bytes
+	uniPolyEndMsg = [32]byte{
+		'U', 'n', 'i', 'P', 'o', 'l', 'y', '_', 'e', 'n', 'd',
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+)
+
 // Define implements the full E2E circuit constraints.
 func (c *FullE2ECircuit) Define(api frontend.API) error {
 	// =========================================================================
@@ -132,29 +149,33 @@ func (c *FullE2ECircuit) Define(api frontend.API) error {
 
 	// =========================================================================
 	// Part 2: Recursion Sumcheck Verification (emulated Fq)
+	// Challenges are DERIVED from Fr Poseidon transcript, NOT passed as hints
 	// =========================================================================
 	fq, err := emulated.NewField[sw_grumpkin.ScalarField](api)
 	if err != nil {
 		return err
 	}
 
-	// Stage 1 (a17): degree 7
-	if err := verifyRecursionDegree7(api, fq, c.RecursionStage1Coeffs[:], c.RecursionStage1Challenges[:], &c.RecursionStage1Expected); err != nil {
+	// Initialize native Fr transcript from stages 1-7 state
+	transcript := poseidon.NewFrTranscriptFromState(api, c.RecursionInitialTranscriptState, c.RecursionInitialNRounds)
+
+	// Stage 1 (a17): degree 7 - challenges derived from transcript
+	if err := verifyRecursionDegree7WithTranscript(api, fq, transcript, c.RecursionStage1Coeffs[:], &c.RecursionStage1Expected); err != nil {
 		return err
 	}
 
-	// Stage 2 (a18): degree 6
-	if err := verifyRecursionDegree6(api, fq, c.RecursionStage2Coeffs[:], c.RecursionStage2Challenges[:], &c.RecursionStage2Expected); err != nil {
+	// Stage 2 (a18): degree 6 - challenges derived from transcript
+	if err := verifyRecursionDegree6WithTranscript(api, fq, transcript, c.RecursionStage2Coeffs[:], &c.RecursionStage2Expected); err != nil {
 		return err
 	}
 
-	// Stage 4 (a20): degree 2
-	if err := verifyRecursionDegree2(api, fq, c.RecursionStage4Coeffs[:], c.RecursionStage4Challenges[:], &c.RecursionStage4Expected); err != nil {
+	// Stage 4 (a20): degree 2 - challenges derived from transcript
+	if err := verifyRecursionDegree2WithTranscript(api, fq, transcript, c.RecursionStage4Coeffs[:], &c.RecursionStage4Expected); err != nil {
 		return err
 	}
 
-	// Stage 5 (a21): degree 2
-	if err := verifyRecursionDegree2(api, fq, c.RecursionStage5Coeffs[:], c.RecursionStage5Challenges[:], &c.RecursionStage5Expected); err != nil {
+	// Stage 5 (a21): degree 2 - challenges derived from transcript
+	if err := verifyRecursionDegree2WithTranscript(api, fq, transcript, c.RecursionStage5Coeffs[:], &c.RecursionStage5Expected); err != nil {
 		return err
 	}
 
@@ -229,12 +250,12 @@ func (c *FullE2ECircuit) defineHyraxVerification(api frontend.API, fq *emulated.
 	return nil
 }
 
-// Recursion sumcheck verification helpers
-func verifyRecursionDegree7(
+// Recursion sumcheck verification helpers - challenges derived from Fr Poseidon transcript
+func verifyRecursionDegree7WithTranscript(
 	api frontend.API,
 	fq *emulated.Field[sw_grumpkin.ScalarField],
+	transcript *poseidon.FrTranscript,
 	coeffs [][7]sw_grumpkin.Scalar,
-	challenges []frontend.Variable,
 	expected *sw_grumpkin.Scalar,
 ) error {
 	prevEval := fq.Zero()
@@ -250,9 +271,28 @@ func verifyRecursionDegree7(
 		c6 := &coeffs[round][5]
 		c7 := &coeffs[round][6]
 
-		rBits := api.ToBinary(challenges[round], 254)
+		// Transcript protocol using NATIVE Fr Poseidon:
+		// 1. Append "UniPoly_begin"
+		transcript.AppendMessage(uniPolyBeginMsg)
+
+		// 2. Append coefficients - convert Fq (Grumpkin scalar) to Fr for transcript
+		transcript.AppendScalarGrumpkin(fq, c0)
+		transcript.AppendScalarGrumpkin(fq, c2)
+		transcript.AppendScalarGrumpkin(fq, c3)
+		transcript.AppendScalarGrumpkin(fq, c4)
+		transcript.AppendScalarGrumpkin(fq, c5)
+		transcript.AppendScalarGrumpkin(fq, c6)
+		transcript.AppendScalarGrumpkin(fq, c7)
+
+		// 3. Append "UniPoly_end"
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		// 4. Derive challenge in Fr, convert to Fq
+		rFr := transcript.ChallengeScalar()
+		rBits := api.ToBinary(rFr, 254)
 		r := fq.FromBits(rBits...)
 
+		// Reconstruct c1 = prevEval - 2*c0 - c2 - c3 - c4 - c5 - c6 - c7
 		twoC0 := fq.Mul(two, c0)
 		c1 := fq.Sub(prevEval, twoC0)
 		c1 = fq.Sub(c1, c2)
@@ -262,6 +302,7 @@ func verifyRecursionDegree7(
 		c1 = fq.Sub(c1, c6)
 		c1 = fq.Sub(c1, c7)
 
+		// Horner's: p(r) = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*(c5 + r*(c6 + r*c7))))))
 		acc := c7
 		acc = fq.Add(c6, fq.Mul(r, acc))
 		acc = fq.Add(c5, fq.Mul(r, acc))
@@ -278,11 +319,11 @@ func verifyRecursionDegree7(
 	return nil
 }
 
-func verifyRecursionDegree6(
+func verifyRecursionDegree6WithTranscript(
 	api frontend.API,
 	fq *emulated.Field[sw_grumpkin.ScalarField],
+	transcript *poseidon.FrTranscript,
 	coeffs [][6]sw_grumpkin.Scalar,
-	challenges []frontend.Variable,
 	expected *sw_grumpkin.Scalar,
 ) error {
 	prevEval := fq.Zero()
@@ -297,9 +338,21 @@ func verifyRecursionDegree6(
 		c5 := &coeffs[round][4]
 		c6 := &coeffs[round][5]
 
-		rBits := api.ToBinary(challenges[round], 254)
+		// Transcript protocol
+		transcript.AppendMessage(uniPolyBeginMsg)
+		transcript.AppendScalarGrumpkin(fq, c0)
+		transcript.AppendScalarGrumpkin(fq, c2)
+		transcript.AppendScalarGrumpkin(fq, c3)
+		transcript.AppendScalarGrumpkin(fq, c4)
+		transcript.AppendScalarGrumpkin(fq, c5)
+		transcript.AppendScalarGrumpkin(fq, c6)
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		rFr := transcript.ChallengeScalar()
+		rBits := api.ToBinary(rFr, 254)
 		r := fq.FromBits(rBits...)
 
+		// Reconstruct c1 = prevEval - 2*c0 - c2 - c3 - c4 - c5 - c6
 		twoC0 := fq.Mul(two, c0)
 		c1 := fq.Sub(prevEval, twoC0)
 		c1 = fq.Sub(c1, c2)
@@ -308,6 +361,7 @@ func verifyRecursionDegree6(
 		c1 = fq.Sub(c1, c5)
 		c1 = fq.Sub(c1, c6)
 
+		// Horner's evaluation
 		acc := c6
 		acc = fq.Add(c5, fq.Mul(r, acc))
 		acc = fq.Add(c4, fq.Mul(r, acc))
@@ -323,11 +377,11 @@ func verifyRecursionDegree6(
 	return nil
 }
 
-func verifyRecursionDegree2(
+func verifyRecursionDegree2WithTranscript(
 	api frontend.API,
 	fq *emulated.Field[sw_grumpkin.ScalarField],
+	transcript *poseidon.FrTranscript,
 	coeffs [][2]sw_grumpkin.Scalar,
-	challenges []frontend.Variable,
 	expected *sw_grumpkin.Scalar,
 ) error {
 	prevEval := fq.Zero()
@@ -338,13 +392,22 @@ func verifyRecursionDegree2(
 		c0 := &coeffs[round][0]
 		c2 := &coeffs[round][1]
 
-		rBits := api.ToBinary(challenges[round], 254)
+		// Transcript protocol
+		transcript.AppendMessage(uniPolyBeginMsg)
+		transcript.AppendScalarGrumpkin(fq, c0)
+		transcript.AppendScalarGrumpkin(fq, c2)
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		rFr := transcript.ChallengeScalar()
+		rBits := api.ToBinary(rFr, 254)
 		r := fq.FromBits(rBits...)
 
+		// Reconstruct c1 = prevEval - 2*c0 - c2
 		twoC0 := fq.Mul(two, c0)
 		c1 := fq.Sub(prevEval, twoC0)
 		c1 = fq.Sub(c1, c2)
 
+		// Horner's: p(r) = c0 + r*(c1 + r*c2)
 		acc := c2
 		acc = fq.Add(c1, fq.Mul(r, acc))
 		acc = fq.Add(c0, fq.Mul(r, acc))
@@ -481,53 +544,61 @@ func TestFullE2ESolver(t *testing.T) {
 		HyraxR:              make([]frontend.Variable, sqrtN),
 	}
 
-	// Fill recursion witness
+	// Fill recursion witness - challenges are derived from transcript, NOT loaded
 	stage1Coeffs := loadStage1CoeffsLocal(&recursionWitness)
 	stage2Coeffs := loadStage2CoeffsLocal(&recursionWitness)
 	stage4Coeffs := loadStage4CoeffsLocal(&recursionWitness)
 	stage5Coeffs := loadStage5CoeffsLocal(&recursionWitness)
 
-	stage1Challenges := loadChallengesLocal(recursionWitness.Stage1Challenges)
-	stage2Challenges := loadChallengesLocal(recursionWitness.Stage2Challenges)
-	stage4Challenges := loadChallengesLocal(recursionWitness.Stage4Challenges)
-	stage5Challenges := loadChallengesLocal(recursionWitness.Stage5Challenges)
+	// Set initial transcript state (starts fresh for recursion verifier)
+	initialState := big.NewInt(0)
+	initialNRounds := int64(0)
+	witness.RecursionInitialTranscriptState = initialState
+	witness.RecursionInitialNRounds = big.NewInt(initialNRounds)
+
+	// Compute expected values using native Fr transcript
+	// This ensures the expected values match the transcript-derived challenges
+	stage1Exp, stage2Exp, stage4Exp, stage5Exp := computeAllStagesExpectedLocal(
+		stage1Coeffs, stage2Coeffs, stage4Coeffs, stage5Coeffs,
+		initialState, initialNRounds,
+	)
+	t.Logf("  Stage 1 expected (computed): %s", stage1Exp.String())
+	t.Logf("  Stage 2 expected (computed): %s", stage2Exp.String())
+	t.Logf("  Stage 4 expected (computed): %s", stage4Exp.String())
+	t.Logf("  Stage 5 expected (computed): %s", stage5Exp.String())
 
 	// Stage 1
 	for round := 0; round < 11; round++ {
 		for i := 0; i < 7; i++ {
 			witness.RecursionStage1Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage1Coeffs[round][i])
 		}
-		witness.RecursionStage1Challenges[round] = stage1Challenges[round]
 	}
-	witness.RecursionStage1Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitness.Stage1Expected))
+	witness.RecursionStage1Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage1Exp)
 
 	// Stage 2
 	for round := 0; round < 11; round++ {
 		for i := 0; i < 6; i++ {
 			witness.RecursionStage2Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage2Coeffs[round][i])
 		}
-		witness.RecursionStage2Challenges[round] = stage2Challenges[round]
 	}
-	witness.RecursionStage2Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitness.Stage2Expected))
+	witness.RecursionStage2Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage2Exp)
 
 	// Stage 4
 	for round := 0; round < 22; round++ {
 		for i := 0; i < 2; i++ {
 			witness.RecursionStage4Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage4Coeffs[round][i])
 		}
-		witness.RecursionStage4Challenges[round] = stage4Challenges[round]
 	}
-	witness.RecursionStage4Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitness.Stage4Expected))
+	witness.RecursionStage4Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage4Exp)
 
 	// Stage 5
 	for round := 0; round < 88; round++ {
 		for i := 0; i < 2; i++ {
 			witness.RecursionStage5Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage5Coeffs[round][i])
 		}
-		witness.RecursionStage5Challenges[round] = stage5Challenges[round]
 	}
-	witness.RecursionStage5Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitness.Stage5Expected))
-	t.Log("  ✓ Filled recursion sumcheck witness")
+	witness.RecursionStage5Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage5Exp)
+	t.Log("  ✓ Filled recursion sumcheck witness (challenges derived from transcript)")
 
 	// Fill Hyrax witness
 	for i := 0; i < sqrtN1; i++ {
@@ -659,48 +730,51 @@ func TestFullE2EGroth16(t *testing.T) {
 		HyraxR:              make([]frontend.Variable, sqrtN),
 	}
 
-	// Fill recursion witness (same as solver test)
+	// Fill recursion witness - challenges are derived from transcript, NOT loaded
 	stage1CoeffsG16 := loadStage1CoeffsLocal(&recursionWitnessGroth16)
 	stage2CoeffsG16 := loadStage2CoeffsLocal(&recursionWitnessGroth16)
 	stage4CoeffsG16 := loadStage4CoeffsLocal(&recursionWitnessGroth16)
 	stage5CoeffsG16 := loadStage5CoeffsLocal(&recursionWitnessGroth16)
 
-	stage1ChallengesG16 := loadChallengesLocal(recursionWitnessGroth16.Stage1Challenges)
-	stage2ChallengesG16 := loadChallengesLocal(recursionWitnessGroth16.Stage2Challenges)
-	stage4ChallengesG16 := loadChallengesLocal(recursionWitnessGroth16.Stage4Challenges)
-	stage5ChallengesG16 := loadChallengesLocal(recursionWitnessGroth16.Stage5Challenges)
+	// Set initial transcript state (starts fresh for recursion verifier)
+	initialStateG16 := big.NewInt(0)
+	initialNRoundsG16 := int64(0)
+	witness.RecursionInitialTranscriptState = initialStateG16
+	witness.RecursionInitialNRounds = big.NewInt(initialNRoundsG16)
+
+	// Compute expected values using native Fr transcript (must match circuit's transcript)
+	stage1ExpG16, stage2ExpG16, stage4ExpG16, stage5ExpG16 := computeAllStagesExpectedLocal(
+		stage1CoeffsG16, stage2CoeffsG16, stage4CoeffsG16, stage5CoeffsG16,
+		initialStateG16, initialNRoundsG16,
+	)
 
 	for round := 0; round < 11; round++ {
 		for i := 0; i < 7; i++ {
 			witness.RecursionStage1Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage1CoeffsG16[round][i])
 		}
-		witness.RecursionStage1Challenges[round] = stage1ChallengesG16[round]
 	}
-	witness.RecursionStage1Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitnessGroth16.Stage1Expected))
+	witness.RecursionStage1Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage1ExpG16)
 
 	for round := 0; round < 11; round++ {
 		for i := 0; i < 6; i++ {
 			witness.RecursionStage2Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage2CoeffsG16[round][i])
 		}
-		witness.RecursionStage2Challenges[round] = stage2ChallengesG16[round]
 	}
-	witness.RecursionStage2Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitnessGroth16.Stage2Expected))
+	witness.RecursionStage2Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage2ExpG16)
 
 	for round := 0; round < 22; round++ {
 		for i := 0; i < 2; i++ {
 			witness.RecursionStage4Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage4CoeffsG16[round][i])
 		}
-		witness.RecursionStage4Challenges[round] = stage4ChallengesG16[round]
 	}
-	witness.RecursionStage4Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitnessGroth16.Stage4Expected))
+	witness.RecursionStage4Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage4ExpG16)
 
 	for round := 0; round < 88; round++ {
 		for i := 0; i < 2; i++ {
 			witness.RecursionStage5Coeffs[round][i] = emulated.ValueOf[sw_grumpkin.ScalarField](stage5CoeffsG16[round][i])
 		}
-		witness.RecursionStage5Challenges[round] = stage5ChallengesG16[round]
 	}
-	witness.RecursionStage5Expected = emulated.ValueOf[sw_grumpkin.ScalarField](toBigIntLocal(recursionWitnessGroth16.Stage5Expected))
+	witness.RecursionStage5Expected = emulated.ValueOf[sw_grumpkin.ScalarField](stage5ExpG16)
 
 	// Fill Hyrax witness
 	for i := 0; i < sqrtN1; i++ {
@@ -894,4 +968,245 @@ func loadChallengesLocal(strs []string) []*big.Int {
 		challenges[i] = toBigIntLocal(s)
 	}
 	return challenges
+}
+
+// ============================================================================
+// Native Fr Poseidon Transcript (for computing expected values in tests)
+// ============================================================================
+
+// Field moduli for native big.Int computation in tests
+var (
+	// BN254 scalar field (Fr)
+	frModLocal, _ = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	// BN254 base field (Fq) = Grumpkin scalar field
+	fqModLocal, _ = new(big.Int).SetString("21888242871839275222246405745257275088696311157297823662689037894645226208583", 10)
+)
+
+// FrTranscriptNativeLocal is a native (non-circuit) implementation of Fr Poseidon transcript
+// for computing expected values in tests.
+type FrTranscriptNativeLocal struct {
+	state   *big.Int
+	nRounds int64
+}
+
+func NewFrTranscriptNativeLocal(state *big.Int, nRounds int64) *FrTranscriptNativeLocal {
+	return &FrTranscriptNativeLocal{
+		state:   new(big.Int).Set(state),
+		nRounds: nRounds,
+	}
+}
+
+func (t *FrTranscriptNativeLocal) AppendScalar(scalar *big.Int) {
+	nRoundsBig := big.NewInt(t.nRounds)
+	t.state = poseidon.HashNative(t.state, nRoundsBig, scalar)
+	t.nRounds++
+}
+
+func (t *FrTranscriptNativeLocal) AppendMessage(msgBytes32 [32]byte) {
+	// Convert bytes to big.Int (BE interpretation)
+	msgBig := new(big.Int).SetBytes(msgBytes32[:])
+	msgBig.Mod(msgBig, frModLocal)
+	t.AppendScalar(msgBig)
+}
+
+// AppendScalarFq appends an Fq scalar by converting to Fr
+func (t *FrTranscriptNativeLocal) AppendScalarFq(scalar *big.Int) {
+	// Fq values are just reduced mod Fr
+	frVal := new(big.Int).Mod(scalar, frModLocal)
+	t.AppendScalar(frVal)
+}
+
+func (t *FrTranscriptNativeLocal) ChallengeScalar() *big.Int {
+	nRoundsBig := big.NewInt(t.nRounds)
+	zero := big.NewInt(0)
+	output := poseidon.HashNative(t.state, nRoundsBig, zero)
+	t.state = output
+	t.nRounds++
+	return new(big.Int).Set(output)
+}
+
+// computeAllStagesExpectedLocal computes all 4 recursion stages with Fr transcript
+func computeAllStagesExpectedLocal(
+	stage1Coeffs [][7]*big.Int,
+	stage2Coeffs [][6]*big.Int,
+	stage4Coeffs [][2]*big.Int,
+	stage5Coeffs [][2]*big.Int,
+	initialState *big.Int,
+	initialNRounds int64,
+) (stage1Exp, stage2Exp, stage4Exp, stage5Exp *big.Int) {
+	transcript := NewFrTranscriptNativeLocal(initialState, initialNRounds)
+
+	// Stage 1
+	stage1Exp, _ = computeSumcheckDegree7WithFrTranscriptNativeLocal(stage1Coeffs, transcript)
+
+	// Stage 2
+	stage2Exp = computeSumcheckDegree6WithFrTranscriptNativeLocal(stage2Coeffs, transcript)
+
+	// Stage 4
+	stage4Exp = computeSumcheckDegree2WithFrTranscriptNativeLocal(stage4Coeffs, transcript)
+
+	// Stage 5
+	stage5Exp = computeSumcheckDegree2WithFrTranscriptNativeLocal(stage5Coeffs, transcript)
+
+	return
+}
+
+func computeSumcheckDegree7WithFrTranscriptNativeLocal(
+	coeffs [][7]*big.Int,
+	transcript *FrTranscriptNativeLocal,
+) (*big.Int, []*big.Int) {
+	prevEval := big.NewInt(0)
+	two := big.NewInt(2)
+	challenges := make([]*big.Int, len(coeffs))
+
+	for round := 0; round < len(coeffs); round++ {
+		c := coeffs[round]
+
+		// Transcript protocol
+		transcript.AppendMessage(uniPolyBeginMsg)
+		for i := 0; i < 7; i++ {
+			transcript.AppendScalarFq(c[i])
+		}
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		// Get Fr challenge, convert to Fq
+		rFr := transcript.ChallengeScalar()
+		r := new(big.Int).Mod(rFr, fqModLocal) // Fr -> Fq
+		challenges[round] = r
+
+		// Reconstruct c1
+		c1 := new(big.Int).Set(prevEval)
+		twoC0 := new(big.Int).Mul(two, c[0])
+		c1.Sub(c1, twoC0)
+		for i := 1; i < 7; i++ {
+			c1.Sub(c1, c[i])
+		}
+		c1.Mod(c1, fqModLocal)
+
+		// Horner's evaluation: c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*(c5 + r*(c6 + r*c7))))))
+		acc := new(big.Int).Set(c[6]) // c7
+		acc.Mul(r, acc)
+		acc.Add(c[5], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[4], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[3], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[2], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[1], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c1, acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[0], acc)
+		acc.Mod(acc, fqModLocal)
+
+		prevEval = acc
+	}
+
+	return prevEval, challenges
+}
+
+func computeSumcheckDegree6WithFrTranscriptNativeLocal(coeffs [][6]*big.Int, transcript *FrTranscriptNativeLocal) *big.Int {
+	prevEval := big.NewInt(0)
+	two := big.NewInt(2)
+
+	for round := 0; round < len(coeffs); round++ {
+		c := coeffs[round]
+
+		transcript.AppendMessage(uniPolyBeginMsg)
+		for i := 0; i < 6; i++ {
+			transcript.AppendScalarFq(c[i])
+		}
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		rFr := transcript.ChallengeScalar()
+		r := new(big.Int).Mod(rFr, fqModLocal)
+
+		c1 := new(big.Int).Set(prevEval)
+		twoC0 := new(big.Int).Mul(two, c[0])
+		c1.Sub(c1, twoC0)
+		for i := 1; i < 6; i++ {
+			c1.Sub(c1, c[i])
+		}
+		c1.Mod(c1, fqModLocal)
+
+		acc := new(big.Int).Set(c[5])
+		acc.Mul(r, acc)
+		acc.Add(c[4], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[3], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[2], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[1], acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c1, acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[0], acc)
+		acc.Mod(acc, fqModLocal)
+
+		prevEval = acc
+	}
+
+	return prevEval
+}
+
+func computeSumcheckDegree2WithFrTranscriptNativeLocal(coeffs [][2]*big.Int, transcript *FrTranscriptNativeLocal) *big.Int {
+	prevEval := big.NewInt(0)
+	two := big.NewInt(2)
+
+	for round := 0; round < len(coeffs); round++ {
+		c := coeffs[round]
+
+		transcript.AppendMessage(uniPolyBeginMsg)
+		for i := 0; i < 2; i++ {
+			transcript.AppendScalarFq(c[i])
+		}
+		transcript.AppendMessage(uniPolyEndMsg)
+
+		rFr := transcript.ChallengeScalar()
+		r := new(big.Int).Mod(rFr, fqModLocal)
+
+		c1 := new(big.Int).Set(prevEval)
+		twoC0 := new(big.Int).Mul(two, c[0])
+		c1.Sub(c1, twoC0)
+		c1.Sub(c1, c[1])
+		c1.Mod(c1, fqModLocal)
+
+		acc := new(big.Int).Set(c[1])
+		acc.Mul(r, acc)
+		acc.Add(c1, acc)
+		acc.Mod(acc, fqModLocal)
+
+		acc.Mul(r, acc)
+		acc.Add(c[0], acc)
+		acc.Mod(acc, fqModLocal)
+
+		prevEval = acc
+	}
+
+	return prevEval
 }

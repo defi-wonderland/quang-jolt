@@ -10,6 +10,7 @@ package poseidon
 
 import (
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/algebra/native/sw_grumpkin"
 	"github.com/consensys/gnark/std/math/emulated"
 )
 
@@ -69,6 +70,19 @@ func (t *FrTranscript) AppendMessage(msgBytes32 [32]byte) {
 // AppendScalarFq absorbs an emulated Fq scalar by converting to Fr.
 // Uses bit decomposition: Fq → bits → Fr (cheap, ~254 constraints).
 func (t *FrTranscript) AppendScalarFq(fq *emulated.Field[emulated.BN254Fp], scalar *emulated.Element[emulated.BN254Fp]) {
+	// Reduce to get canonical representation
+	reduced := fq.Reduce(scalar)
+	// Convert to bits
+	bits := fq.ToBits(reduced)
+	// Reconstruct as native Fr (take lower 254 bits)
+	frVal := t.api.FromBinary(bits[:254]...)
+	t.AppendScalar(frVal)
+}
+
+// AppendScalarGrumpkin absorbs a Grumpkin scalar (= BN254 Fq) by converting to Fr.
+// This is the same as AppendScalarFq but uses sw_grumpkin.ScalarField type.
+// Uses bit decomposition: Fq → bits → Fr (cheap, ~254 constraints).
+func (t *FrTranscript) AppendScalarGrumpkin(fq *emulated.Field[sw_grumpkin.ScalarField], scalar *sw_grumpkin.Scalar) {
 	// Reduce to get canonical representation
 	reduced := fq.Reduce(scalar)
 	// Convert to bits

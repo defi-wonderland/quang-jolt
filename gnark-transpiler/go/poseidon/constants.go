@@ -541,7 +541,17 @@ func GetCConstants() []*big.Int {
 	return cConstants
 }
 
+// GetSConstants returns the partial round constants for native Fr Poseidon
+func GetSConstants() []*big.Int {
+	return sConstants
+}
+
 // GetMMatrix returns the MDS matrix for native Fr Poseidon
 func GetMMatrix() [][]*big.Int {
 	return mMatrix
+}
+
+// GetPMatrix returns the pre-sparse matrix for native Fr Poseidon
+func GetPMatrix() [][]*big.Int {
+	return pMatrix
 }

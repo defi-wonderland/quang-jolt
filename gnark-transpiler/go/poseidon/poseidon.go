@@ -397,6 +397,115 @@ func truncate128Hint(_ *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	return nil
 }
 
+// =============================================================================
+// NATIVE HASH FUNCTION FOR TESTS
+// =============================================================================
+
+// HashNative computes Poseidon hash of 3 field elements using big.Int arithmetic.
+// This is for test code to compute expected values.
+func HashNative(in1, in2, in3 *big.Int) *big.Int {
+	state := [4]*big.Int{big.NewInt(0), new(big.Int).Set(in1), new(big.Int).Set(in2), new(big.Int).Set(in3)}
+
+	// First half full rounds
+	state = arkNative(state, 0)
+	state = fullRoundsNative(state, true)
+
+	// Partial rounds
+	state = partialRoundsNative(state)
+
+	// Second half full rounds
+	state = fullRoundsNative(state, false)
+
+	return state[0]
+}
+
+func arkNative(state [4]*big.Int, it int) [4]*big.Int {
+	var result [4]*big.Int
+	for i := 0; i < 4; i++ {
+		result[i] = new(big.Int).Add(state[i], cConstants[it+i])
+		result[i].Mod(result[i], bn254FrModulus)
+	}
+	return result
+}
+
+func exp5Native(x *big.Int) *big.Int {
+	x2 := new(big.Int).Mul(x, x)
+	x2.Mod(x2, bn254FrModulus)
+	x4 := new(big.Int).Mul(x2, x2)
+	x4.Mod(x4, bn254FrModulus)
+	x5 := new(big.Int).Mul(x4, x)
+	x5.Mod(x5, bn254FrModulus)
+	return x5
+}
+
+func exp5StateNative(state [4]*big.Int) [4]*big.Int {
+	for i := 0; i < 4; i++ {
+		state[i] = exp5Native(state[i])
+	}
+	return state
+}
+
+func mixNative(state [4]*big.Int, matrix [][]*big.Int) [4]*big.Int {
+	var result [4]*big.Int
+	for i := 0; i < 4; i++ {
+		result[i] = big.NewInt(0)
+	}
+	for i := 0; i < 4; i++ {
+		for j := 0; j < 4; j++ {
+			term := new(big.Int).Mul(matrix[j][i], state[j])
+			result[i].Add(result[i], term)
+		}
+		result[i].Mod(result[i], bn254FrModulus)
+	}
+	return result
+}
+
+func fullRoundsNative(state [4]*big.Int, isFirst bool) [4]*big.Int {
+	for i := 0; i < BN254_FULL_ROUNDS/2-1; i++ {
+		state = exp5StateNative(state)
+		if isFirst {
+			state = arkNative(state, (i+1)*BN254_SPONGE_WIDTH)
+		} else {
+			state = arkNative(state, (BN254_FULL_ROUNDS/2+1)*BN254_SPONGE_WIDTH+BN254_PARTIAL_ROUNDS+i*BN254_SPONGE_WIDTH)
+		}
+		state = mixNative(state, mMatrix)
+	}
+
+	state = exp5StateNative(state)
+	if isFirst {
+		state = arkNative(state, (BN254_FULL_ROUNDS/2)*BN254_SPONGE_WIDTH)
+		state = mixNative(state, pMatrix)
+	} else {
+		state = mixNative(state, mMatrix)
+	}
+
+	return state
+}
+
+func partialRoundsNative(state [4]*big.Int) [4]*big.Int {
+	for i := 0; i < BN254_PARTIAL_ROUNDS; i++ {
+		state[0] = exp5Native(state[0])
+		state[0].Add(state[0], cConstants[(BN254_FULL_ROUNDS/2+1)*BN254_SPONGE_WIDTH+i])
+		state[0].Mod(state[0], bn254FrModulus)
+
+		newState0 := big.NewInt(0)
+		for j := 0; j < BN254_SPONGE_WIDTH; j++ {
+			term := new(big.Int).Mul(sConstants[(BN254_SPONGE_WIDTH*2-1)*i+j], state[j])
+			newState0.Add(newState0, term)
+		}
+		newState0.Mod(newState0, bn254FrModulus)
+
+		for k := 1; k < BN254_SPONGE_WIDTH; k++ {
+			term := new(big.Int).Mul(state[0], sConstants[(BN254_SPONGE_WIDTH*2-1)*i+BN254_SPONGE_WIDTH+k-1])
+			state[k].Add(state[k], term)
+			state[k].Mod(state[k], bn254FrModulus)
+		}
+		state[0] = newState0
+	}
+
+	return state
+}
+
 // AppendU64Transform computes the field element for append_u64(x).
 //
 // PoseidonTranscript::append_u64 does:
