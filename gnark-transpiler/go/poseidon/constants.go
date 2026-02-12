@@ -535,3 +535,13 @@ func init() {
 	pMatrix[3][2], _ = new(big.Int).SetString("11841890240732656097844244837012648335708695431011214021127380678644769978309", 10)
 	pMatrix[3][3], _ = new(big.Int).SetString("10936049757440664316304266313740303505981633272820388610540392640560764966725", 10)
 }
+
+// GetCConstants returns the circom round constants for native Fr Poseidon
+func GetCConstants() []*big.Int {
+	return cConstants
+}
+
+// GetMMatrix returns the MDS matrix for native Fr Poseidon
+func GetMMatrix() [][]*big.Int {
+	return mMatrix
+}
